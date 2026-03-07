@@ -1,0 +1,105 @@
+n_epochs: 500
+seed: 1
+ckpt_interval: 500
+patience: null
+data_parallel: true
+weight_average: null
+
+data:
+  directory: models/
+  experiment: cmnn
+
+  data_path: <PATH>
+  #train_data_path: <PATH>
+  #val_data_path: <PATH>
+  #test_data_path: <PATH>
+  dataset:
+    processing: cached
+    shuffle_buffer_size: 1000
+
+  n_train: 1000
+  n_valid: 100
+
+  batch_size: 4
+  valid_batch_size: 100
+
+  shift_method: "per_element_regression_shift"
+  shift_options: {"energy_regularisation": 1.0}
+
+  scale_method: "per_element_force_rms_scale"
+  scale_options: {}
+
+  pos_unit: Ang
+  energy_unit: eV
+
+model:
+  name: cmnn
+  basis:
+    name: chebyshev
+    n_basis: 16
+    r_max: 5.0
+
+  n_radial: 16
+  n_contr: 8
+  nn: [256, 256]
+
+  ensemble: null
+  # ensemble:
+  #   kind: shallow
+  #   n_members: 8
+
+  empirical_corrections: []
+  property_heads: []
+
+  calc_stress: false
+
+  w_init: lecun
+  b_init: zeros
+  descriptor_dtype: fp32
+  readout_dtype: fp32
+  scale_shift_dtype: fp64
+  use_ntk: false
+
+loss:
+- name: energy
+  loss_type: mse
+  weight: 1.0
+  atoms_exponent: 1
+- name: forces
+  loss_type: mse
+  weight: 4.0
+  atoms_exponent: 1
+
+metrics:
+- name: energy
+  reductions:
+  - mae
+- name: forces
+  reductions:
+  - mae
+  - mse
+
+optimizer:
+  name: adam
+  kwargs: {}
+  emb_lr: 0.001
+  nn_lr: 0.001
+  scale_lr: 0.0001
+  shift_lr: 0.003
+  zbl_lr: 0.0001
+  schedule:
+    name: cyclic_cosine
+    period: 40
+    decay_factor: 0.93
+
+callbacks:
+- name: csv
+
+transfer_learning:
+  base_model_checkpoint: null
+  reset_layers: []
+  freeze_layers: []
+
+progress_bar:
+  disable_epoch_pbar: false
+  disable_batch_pbar: true

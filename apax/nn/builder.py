@@ -8,8 +8,11 @@ from apax.layers.descriptor import (
     GaussianMomentDescriptor,
     So3kratesRepresentation,
 )
+from apax.layers.descriptor.cartesian_moment_descriptor import CartesianMomentDescriptor
 from apax.layers.descriptor.basis_functions import (
     BesselBasis,
+    ChebyshevBasis,
+    EmbeddedRadialFunction,
     GaussianBasis,
     RadialFunction,
 )
@@ -49,6 +52,12 @@ class ModelBuilder:
                 r_max=basis_config["r_max"],
                 dtype=self.config["descriptor_dtype"],
             )
+        elif name == "chebyshev":
+            basis_fn = ChebyshevBasis(
+                n_basis=basis_config["n_basis"],
+                r_max=basis_config["r_max"],
+                dtype=self.config["descriptor_dtype"],
+            )
         else:
             raise ValueError("unknown basis requested")
         return basis_fn
@@ -70,6 +79,16 @@ class ModelBuilder:
             emb_init=self.config["emb_init"],
             use_embed_norm=use_embed_norm,
             one_sided_dist=one_sided_dist,
+            dtype=self.config["descriptor_dtype"],
+        )
+        return radial_fn
+
+    def build_embedded_radial_function(self):
+        basis_fn = self.build_basis_function()
+        radial_fn = EmbeddedRadialFunction(
+            basis_fn=basis_fn,
+            n_radial=self.config["n_radial"],
+            n_species=self.n_species,
             dtype=self.config["descriptor_dtype"],
         )
         return radial_fn
@@ -247,6 +266,18 @@ class GMNNBuilder(ModelBuilder):
     ):
         radial_fn = self.build_radial_function()
         descriptor = GaussianMomentDescriptor(
+            radial_fn=radial_fn,
+            n_contr=self.config["n_contr"],
+            dtype=self.config["descriptor_dtype"],
+            apply_mask=apply_mask,
+        )
+        return descriptor
+
+
+class CMNNBuilder(ModelBuilder):
+    def build_descriptor(self, apply_mask):
+        radial_fn = self.build_embedded_radial_function()
+        descriptor = CartesianMomentDescriptor(
             radial_fn=radial_fn,
             n_contr=self.config["n_contr"],
             dtype=self.config["descriptor_dtype"],

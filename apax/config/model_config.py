@@ -46,7 +46,25 @@ class BesselBasisConfig(BaseModel, extra="forbid"):
     r_max: PositiveFloat = 5.0
 
 
-BasisConfig = Union[GaussianBasisConfig, BesselBasisConfig]
+class ChebyshevBasisConfig(BaseModel, extra="forbid"):
+    """
+    Chebyshev basis functions assembled via e3x (scalar, L=0).
+
+    Parameters
+    ----------
+    n_basis : PositiveInt, default = 16
+        Number of Chebyshev basis functions.
+    r_max : PositiveFloat, default = 6.0
+        Cutoff radius.  Used for both the cosine envelope and the Chebyshev
+        normalisation limit.
+    """
+
+    name: Literal["chebyshev"] = "chebyshev"
+    n_basis: PositiveInt = 16
+    r_max: PositiveFloat = 6.0
+
+
+BasisConfig = Union[GaussianBasisConfig, BesselBasisConfig, ChebyshevBasisConfig]
 
 
 class FullEnsembleConfig(BaseModel, extra="forbid"):
@@ -290,4 +308,33 @@ class So3kratesConfig(BaseModelConfig, extra="forbid"):
         return So3kratesBuilder
 
 
-ModelConfig = Union[GMNNConfig, EquivMPConfig, So3kratesConfig]
+class CMNNConfig(BaseModelConfig, extra="forbid"):
+    """
+    Cartesian Moment Neural Network — descriptor based on Cartesian geometric
+    moments with a Chebyshev radial basis and environment-aware elemental
+    embeddings refined by scalar message passing.
+
+    Parameters
+    ----------
+    n_radial : PositiveInt, default = 16
+        Number of output channels from the radial function (after the basis
+        projection and Hadamard gate).
+    n_contr : int, default = 8
+        Number of moment contractions to include (1–8).
+    """
+
+    name: Literal["cmnn"] = "cmnn"
+
+    basis: BasisConfig = Field(
+        ChebyshevBasisConfig(name="chebyshev"), discriminator="name"
+    )
+    n_radial: PositiveInt = 16
+    n_contr: int = 8
+
+    def get_builder(self):
+        from apax.nn.builder import CMNNBuilder
+
+        return CMNNBuilder
+
+
+ModelConfig = Union[GMNNConfig, EquivMPConfig, So3kratesConfig, CMNNConfig]

@@ -1,7 +1,10 @@
+import functools
 from typing import Any
 
+import e3x.nn
 import einops
 import flax.linen as nn
+import jax
 import jax.numpy as jnp
 import numpy as np
 
@@ -61,6 +64,175 @@ class BesselBasis(nn.Module):
         s2 = jnp.sinc((self.n + 2) * dr / self.r_max)
         basis = a * b * (s1 + s2)
         return basis
+
+
+class ChebyshevBasis(nn.Module):
+    """Scalar (L=0) Chebyshev basis assembled via e3x.
+
+    Uses ``e3x.nn.basic_chebyshev`` as the radial function and
+    ``e3x.nn.cosine_cutoff`` as the envelope, wrapped by ``e3x.nn.basis``
+    with ``max_degree=0``.
+
+    Unlike ``GaussianBasis`` / ``BesselBasis`` (which take scalar distances),
+    this class takes displacement vectors and passes them directly to e3x.
+    For L=0 only the norm enters, so the direction has no effect on the output.
+
+    Two class-level flags signal this to ``RadialFunction``:
+
+    - ``takes_displacement = True``  — ``__call__`` receives ``dr_vec (n_pairs, 3)``
+    - ``has_cutoff = True``          — envelope is already embedded inside e3x;
+                                       ``RadialFunction`` must not reapply one.
+
+    Parameters
+    ----------
+    n_basis : int
+        Number of Chebyshev basis functions.
+    r_max : float
+        Cutoff radius, used for both the cosine envelope and Chebyshev
+        normalisation (the ``limit`` argument of ``basic_chebyshev``).
+    dtype : dtype
+        Output dtype.
+    """
+
+    n_basis: int = 16
+    r_max: float = 6.0
+    dtype: Any = jnp.float32
+
+    # Non-annotated → not Flax dataclass fields; read by RadialFunction.
+    takes_displacement = True
+    has_cutoff = True
+
+    @nn.compact
+    def __call__(self, dr_vec):
+        # dr_vec shape: (n_pairs, 3)
+        dtype = str_to_dtype(self.dtype)
+        dr_vec = dr_vec.astype(dtype)
+
+        # Output shape for max_degree=0: (n_pairs, 1, 1, n_basis)
+        basis = e3x.nn.basis(
+            dr_vec,
+            max_degree=0,
+            num=self.n_basis,
+            radial_fn=functools.partial(
+                e3x.nn.basic_chebyshev, limit=self.r_max
+            ),
+            cutoff_fn=functools.partial(
+                e3x.nn.cosine_cutoff, cutoff=self.r_max
+            ),
+        )
+
+        # Squeeze parity and (l=0, m=0) dims → (n_pairs, n_basis)
+        return basis[:, 0, 0, :].astype(dtype)
+
+
+class EmbeddedRadialFunction(nn.Module):
+    """Radial function with environment-aware elemental embeddings and Hadamard gating.
+
+    Elemental embeddings are initialised from a learned lookup table and then
+    refined by a single round of scalar message passing over the neighbour
+    graph, so each atom's embedding reflects its local chemical environment
+    rather than being a fixed species label:
+
+        e⁽⁰⁾ = Embed(Z)                              # (n_atoms, 1, 1, n_basis)
+        msg   = MessagePass(e⁽⁰⁾, basis, ...)         # scalar MP, max_degree=0
+        e⁽¹⁾ = e⁽⁰⁾ + msg                            # residual update
+
+    The refined per-atom embeddings are then looked up per pair and concatenated
+    in order (center atom first, neighbor atom second), forming an asymmetric
+    pair representation:
+
+        e_pair = concat(e_i, e_j)                     # (n_pairs, 1, 1, 2*n_basis)
+
+    Finally the radial basis features are projected and Hadamard-gated by the
+    pair embedding (FiLM / Option A — gate acts in the output ``n_radial``
+    space so gradients to the two projections remain loosely coupled):
+
+        basis_proj = Dense(n_radial)(basis)            # geometric compression
+        gate       = 1 + Dense(n_radial)(e_pair)       # species modulation
+        output     = basis_proj * gate                 # (n_pairs, n_radial)
+
+    The gate Dense is **zero-kernel-initialised** so the first forward pass is
+    equivalent to ``basis_proj`` alone, giving a stable training start.
+
+    Parameters
+    ----------
+    basis_fn : nn.Module
+        Displacement-aware radial basis, e.g. ``ChebyshevBasis``.
+        Must accept ``dr_vec (n_pairs, 3)`` and return ``(n_pairs, n_basis)``
+        with the cutoff already applied.
+    n_radial : int
+        Number of output channels per atom-pair.  The elemental embedding
+        dimension is tied to ``basis_fn.n_basis``.
+    n_species : int
+        Number of chemical species supported.
+    dtype : dtype
+        Compute and output dtype.
+    """
+
+    basis_fn: nn.Module = ChebyshevBasis()
+    n_radial: int = 16
+    n_species: int = 119
+    dtype: Any = jnp.float32
+
+    @property
+    def r_max(self):
+        return self.basis_fn.r_max
+
+    @property
+    def _n_radial(self):
+        return self.n_radial
+
+    @nn.compact
+    def __call__(self, dr_vec, Z, neighbor_idxs):
+        dtype = str_to_dtype(self.dtype)
+        dr_vec = dr_vec.astype(dtype)
+
+        idx_i, idx_j = neighbor_idxs[0], neighbor_idxs[1]
+        n_atoms = Z.shape[0]
+        n_basis = self.basis_fn.n_basis
+
+        # Radial basis features: (n_pairs, n_basis) → unsqueeze to e3x format
+        # (n_pairs, 1, 1, n_basis).  Cutoff already applied inside basis_fn.
+        basis = self.basis_fn(dr_vec)[:, None, None, :]
+
+        # Initial per-atom elemental embeddings: (n_atoms, 1, 1, n_basis).
+        # Embedding dim is tied to n_basis so basis and embeddings live in the
+        # same space, which MessagePass can directly combine.
+        embed = e3x.nn.Embed(
+            num_embeddings=self.n_species, features=n_basis, dtype=dtype
+        )
+        e = embed(Z)
+
+        # Scalar message passing (max_degree=0): each atom aggregates radial
+        # basis-weighted neighbour embeddings, refining its representation to
+        # reflect the local chemical environment.
+        msg = e3x.nn.MessagePass(
+            max_degree=0, include_pseudotensors=False, dtype=dtype
+        )(e, basis, dst_idx=idx_i, src_idx=idx_j, num_segments=n_atoms)
+        e = e3x.nn.add(e.astype(dtype), (0.01 * msg).astype(dtype))  # (n_atoms, 1, 1, n_basis)
+
+        # Look up refined embeddings per pair.
+        e_i = e[idx_i]  # (n_pairs, 1, 1, n_basis)
+        e_j = e[idx_j]  # (n_pairs, 1, 1, n_basis)
+
+        # Ordered pair representation: center and neighbor kept separate.
+        e_pair = jnp.concatenate(
+            [e_i, e_j], axis=-1
+        )  # (n_pairs, 1, 1, 2*n_basis)
+
+        # Geometric compression: (n_pairs, 1, 1, n_basis) → (n_pairs, 1, 1, n_radial)
+        basis_proj = e3x.nn.Dense(self.n_radial, use_bias=False, dtype=dtype)(basis)
+
+        # Species gate in n_radial space.  Zero kernel init → gate = 1 at init.
+        gate = 1.0 + e3x.nn.Dense(
+            self.n_radial,
+            use_bias=False,
+            kernel_init=nn.initializers.zeros,
+            dtype=dtype,
+        )(e_pair)
+
+        # Hadamard gate; squeeze e3x dims → (n_pairs, n_radial).
+        return (basis_proj * gate)[:, 0, 0, :].astype(dtype)
 
 
 class RadialFunction(nn.Module):
