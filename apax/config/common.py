@@ -82,8 +82,10 @@ def _unflatten_rec(
                     if param in seen_params:
                         continue
 
-                    new_param = param.lstrip(f"{parent_key}{separator}")
-                    new_param = new_param.lstrip(f"{key}{separator}")
+                    new_param = param
+                    if parent_key:
+                        new_param = new_param.removeprefix(f"{parent_key}{separator}")
+                    new_param = new_param.removeprefix(f"{key}{separator}")
                     dct[key][new_param] = value
                     seen_params.append(param)
     return dct, seen_params
