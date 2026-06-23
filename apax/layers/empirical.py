@@ -24,6 +24,7 @@ class EmpiricalEnergyTerm(nn.Module):
 
 class ZBLRepulsion(EmpiricalEnergyTerm):
     r_max: float = 2.0
+    initial_rep_scale: float = 1.0
     apply_mask: bool = True
 
     def setup(self):
@@ -31,7 +32,7 @@ class ZBLRepulsion(EmpiricalEnergyTerm):
 
         coeffs = jnp.array([0.18175, 0.50986, 0.28022, 0.02817])[:, None]
         coeffs_isp = inverse_softplus(coeffs)
-        rep_scale_isp = inverse_softplus(0.1)
+        rep_scale_isp = inverse_softplus(self.initial_rep_scale)
 
         self.a_exp = 0.23
         self.a_num = 0.46850

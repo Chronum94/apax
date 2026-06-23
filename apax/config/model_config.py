@@ -112,6 +112,7 @@ class Correction(BaseModel, extra="forbid"):
 class ZBLRepulsion(Correction, extra="forbid"):
     name: Literal["zbl"]
     r_max: NonNegativeFloat = 1.5
+    initial_rep_scale: PositiveFloat = 1.0
 
 
 class ExponentialRepulsion(Correction, extra="forbid"):
