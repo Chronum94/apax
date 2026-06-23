@@ -15,6 +15,7 @@ class AtomisticReadout(nn.Module):
     w_init: str = "normal"
     b_init: str = "zeros"
     use_ntk: bool = True
+    use_bias: bool = False
     n_shallow_ensemble: int = 0
     is_feature_fn: bool = False
     dtype: Any = jnp.float32
@@ -36,6 +37,7 @@ class AtomisticReadout(nn.Module):
                 w_init=self.w_init,
                 b_init=self.b_init,
                 use_ntk=self.use_ntk,
+                use_bias=self.use_bias,
                 dtype=dtype,
                 name=f"dense_{ii}",
             )

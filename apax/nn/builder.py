@@ -113,6 +113,7 @@ class ModelBuilder:
             b_init=head_config["b_init"],
             w_init=head_config["w_init"],
             use_ntk=head_config["use_ntk"],
+            use_bias=head_config.get("use_bias", False),
             is_feature_fn=is_feature_fn,
             n_shallow_ensemble=n_shallow_ensemble,
             dtype=dtype,

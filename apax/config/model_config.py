@@ -213,6 +213,7 @@ class BaseModelConfig(BaseModel, extra="forbid"):
     b_init: Literal["normal", "zeros"] = "zeros"
     activation_fn: str = "variance_preserving_swish"
     use_ntk: bool = False
+    use_bias: bool = False
 
     ensemble: Optional[EnsembleConfig] = None
 
