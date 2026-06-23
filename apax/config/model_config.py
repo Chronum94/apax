@@ -214,6 +214,9 @@ class BaseModelConfig(BaseModel, extra="forbid"):
     activation_fn: str = "variance_preserving_swish"
     use_ntk: bool = False
     use_bias: bool = False
+    readout_activation: Literal[
+        "identity", "softplus", "relu", "leaky_relu", "swish"
+    ] = "swish"
 
     ensemble: Optional[EnsembleConfig] = None
 

@@ -3,10 +3,18 @@ from typing import Any, Callable, List
 
 import flax.linen as nn
 import jax.numpy as jnp
-from jax.nn import swish
+from jax.nn import leaky_relu, relu, softplus, swish
 
 from apax.layers.ntk_linear import NTKLinear
 from apax.utils.convert import str_to_dtype
+
+OUTPUT_ACTIVATIONS = {
+    "identity": lambda x: x,
+    "softplus": softplus,
+    "relu": relu,
+    "leaky_relu": leaky_relu,
+    "swish": swish,
+}
 
 
 class AtomisticReadout(nn.Module):
@@ -18,6 +26,7 @@ class AtomisticReadout(nn.Module):
     use_bias: bool = False
     n_shallow_ensemble: int = 0
     is_feature_fn: bool = False
+    output_activation: str = "swish"
     dtype: Any = jnp.float32
 
     def setup(self):
@@ -48,5 +57,7 @@ class AtomisticReadout(nn.Module):
 
     def __call__(self, x):
         h = self.sequential(x)
+        # squash the output to bound short-range extrapolation of the energy
+        h = OUTPUT_ACTIVATIONS[self.output_activation](h)
         # TODO should we move aggregation here?
         return h
