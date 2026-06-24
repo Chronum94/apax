@@ -3,16 +3,15 @@ from typing import Any, Callable, List
 
 import flax.linen as nn
 import jax.numpy as jnp
-from jax.nn import leaky_relu, relu, softplus, swish
+from jax.nn import softplus, swish
 
 from apax.layers.ntk_linear import NTKLinear
 from apax.utils.convert import str_to_dtype
 
 OUTPUT_ACTIVATIONS = {
     "identity": lambda x: x,
-    "softplus": softplus,
-    "relu": relu,
-    "leaky_relu": leaky_relu,
+    # shifted so it passes through the origin, matching identity/swish at x=0
+    "shifted_softplus": lambda x: softplus(x) - jnp.log(2.0),
     "swish": swish,
 }
 
