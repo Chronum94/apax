@@ -176,6 +176,12 @@ class BaseModelConfig(BaseModel, extra="forbid"):
     ----------
     basis : BasisConfig, default = GaussianBasisConfig()
         Configuration for primitive basis functions.
+    radial_transform : Literal["identity", "covalent"], default = "identity"
+        Transform applied to interatomic distances before featurization.
+        `"identity"` featurizes the physical distance unchanged (original
+        behavior). `"covalent"` applies a per-element-pair tanh transform
+        centered at the sum of covalent radii, reallocating basis resolution
+        toward the bonding region.
     nn : List[PositiveInt], default = [256, 256]
         Number of hidden layers and units in those layers.
     w_init : Literal["normal", "lecun"], default = "lecun"
@@ -208,6 +214,7 @@ class BaseModelConfig(BaseModel, extra="forbid"):
     """
 
     basis: BasisConfig = Field(BesselBasisConfig(name="bessel"), discriminator="name")
+    radial_transform: Literal["identity", "covalent"] = "identity"
 
     nn: List[PositiveInt] = [256, 256]
     w_init: Literal["normal", "lecun"] = "lecun"

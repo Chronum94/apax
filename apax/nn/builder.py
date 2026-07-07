@@ -11,7 +11,9 @@ from apax.layers.descriptor import (
 )
 from apax.layers.descriptor.basis_functions import (
     BesselBasis,
+    CovalentRadialTransform,
     GaussianBasis,
+    IdentityRadialTransform,
     RadialFunction,
 )
 from apax.layers.empirical import all_corrections
@@ -55,8 +57,18 @@ class ModelBuilder:
             raise ValueError("unknown basis requested")
         return basis_fn
 
+    def build_radial_transform(self):
+        name = self.config.get("radial_transform", "identity")
+        if name == "identity":
+            return IdentityRadialTransform()
+        elif name == "covalent":
+            return CovalentRadialTransform(dtype=self.config["descriptor_dtype"])
+        else:
+            raise ValueError(f"unknown radial transform requested: {name}")
+
     def build_radial_function(self):
         basis_fn = self.build_basis_function()
+        radial_transform = self.build_radial_transform()
 
         if self.config["basis"]["name"] == "gaussian":
             use_embed_norm = True
@@ -68,6 +80,7 @@ class ModelBuilder:
         radial_fn = RadialFunction(
             n_radial=self.config["n_radial"],
             basis_fn=basis_fn,
+            radial_transform=radial_transform,
             n_species=self.n_species,
             emb_init=self.config["emb_init"],
             use_embed_norm=use_embed_norm,
