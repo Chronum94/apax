@@ -112,7 +112,8 @@ class Correction(BaseModel, extra="forbid"):
 class ZBLRepulsion(Correction, extra="forbid"):
     name: Literal["zbl"]
     r_max: NonNegativeFloat = 1.5
-    initial_rep_scale: PositiveFloat = 1.0
+    # Coulomb constant e^2/(4*pi*eps0) = 14.4 eV*Ang (=1 in Hartree/Bohr).
+    initial_rep_scale: PositiveFloat = 14.4
 
 
 class ExponentialRepulsion(Correction, extra="forbid"):
@@ -222,6 +223,7 @@ class BaseModelConfig(BaseModel, extra="forbid"):
     activation_fn: str = "variance_preserving_swish"
     use_ntk: bool = False
     use_bias: bool = False
+    self_attention: bool = False
     readout_activation: Literal["identity", "shifted_softplus", "swish"] = "swish"
 
     ensemble: Optional[EnsembleConfig] = None

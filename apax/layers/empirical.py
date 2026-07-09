@@ -24,7 +24,9 @@ class EmpiricalEnergyTerm(nn.Module):
 
 class ZBLRepulsion(EmpiricalEnergyTerm):
     r_max: float = 2.0
-    initial_rep_scale: float = 1.0
+    # Coulomb constant e^2/(4*pi*eps0) = 14.4 eV*Ang; the physical prefactor for
+    # the screened Z_i*Z_j/r nuclear repulsion (=1 in Hartree/Bohr units).
+    initial_rep_scale: float = 14.4
     apply_mask: bool = True
 
     def setup(self):
