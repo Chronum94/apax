@@ -128,7 +128,16 @@ class LatentEwald(Correction, extra="forbid"):
     use_property: str = "charges"
 
 
-EmpiricalCorrection = Union[ZBLRepulsion, ExponentialRepulsion, LatentEwald]
+class NLHRepulsion(Correction, extra="forbid"):
+    name: Literal["nlh"]
+    r_max: NonNegativeFloat = 6.0
+    # path to triple-exponential coeffs; None -> bundled apax/data/nlh_coeffs.dat
+    coeffs_file: Optional[str] = None
+
+
+EmpiricalCorrection = Union[
+    ZBLRepulsion, ExponentialRepulsion, LatentEwald, NLHRepulsion
+]
 
 
 class PropertyHead(BaseModel, extra="forbid"):

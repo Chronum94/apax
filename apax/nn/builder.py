@@ -1,6 +1,25 @@
 import logging
+from pathlib import Path
 
 import numpy as np
+
+# bundled triple-exponential repulsion coefficients
+DEFAULT_NLH_COEFFS = Path(__file__).parent.parent / "data" / "nlh_coeffs.dat"
+
+
+def load_nlh_coeffs(path, n_species: int | None = None):
+    """Load triple-exponential repulsion coeffs into (n_species, n_species, 3)
+    arrays a, b, symmetric in the two atomic numbers. Sized to the data
+    (max Z + 1) unless n_species is given. File rows: Z1 Z2 a1 b1 a2 b2 a3 b3."""
+    d = np.loadtxt(path, usecols=range(8))
+    z1, z2 = d[:, 0].astype(int), d[:, 1].astype(int)
+    if n_species is None:
+        n_species = int(max(z1.max(), z2.max())) + 1  # 93 for the bundled Z<=92 set
+    a = np.zeros((n_species, n_species, 3))
+    b = np.zeros((n_species, n_species, 3))
+    a[z1, z2] = a[z2, z1] = d[:, [2, 4, 6]]
+    b[z1, z2] = b[z2, z1] = d[:, [3, 5, 7]]
+    return a, b
 
 from apax.config import ModelConfig
 from apax.layers.activation import get_activation_fn
@@ -163,6 +182,11 @@ class ModelBuilder:
         for correction in self.config["empirical_corrections"]:
             correction = correction.copy()
             name = correction.pop("name")
+            if name == "nlh":
+                # dependency injection: load per-pair coeffs into arrays here
+                path = correction.pop("coeffs_file", None) or DEFAULT_NLH_COEFFS
+                a, b = load_nlh_coeffs(path)
+                correction["a"], correction["b"] = a, b
             Correction = all_corrections[name]
             corr = Correction(
                 **correction,
