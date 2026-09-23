@@ -7,7 +7,7 @@ from jax import vmap
 from jax_md import space
 
 from apax.layers.descriptor.basis_functions import RadialFunction
-from apax.layers.descriptor.moments import geometric_moments
+from apax.layers.descriptor.moments import packed_geometric_moments
 from apax.layers.descriptor.triangular_indices import tril_2d_indices, tril_3d_indices
 from apax.layers.masking import mask_by_neighbor
 from apax.utils.convert import str_to_dtype
@@ -51,7 +51,7 @@ class GaussianMomentDescriptor(nn.Module):
         if self.apply_mask:
             radial_function = mask_by_neighbor(radial_function, neighbor_idxs)
 
-        moments = geometric_moments(radial_function, dn, idx_j, n_atoms)
+        moments = packed_geometric_moments(radial_function, dn, idx_j, n_atoms)
 
         contr_0 = moments[0]
         contr_1 = jnp.einsum("ari, asi -> ars", moments[1], moments[1])  # noqa: E501
