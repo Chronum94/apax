@@ -11,10 +11,21 @@ def load_nlh_coeffs(path, n_species: int | None = None):
     """Load triple-exponential repulsion coeffs into (n_species, n_species, 3)
     arrays a, b, symmetric in the two atomic numbers. Sized to the data
     (max Z + 1) unless n_species is given. File rows: Z1 Z2 a1 b1 a2 b2 a3 b3."""
-    d = np.loadtxt(path, usecols=range(8))
+    d = np.loadtxt(path, usecols=range(8), ndmin=2)
     z1, z2 = d[:, 0].astype(int), d[:, 1].astype(int)
+    max_covered_z = int(max(z1.max(), z2.max()))
     if n_species is None:
-        n_species = int(max(z1.max(), z2.max())) + 1  # 93 for the bundled Z<=92 set
+        n_species = max_covered_z + 1  # 93 for the bundled Z<=92 set
+    elif n_species - 1 > max_covered_z:
+        # Elements above max_covered_z have no coefficients and are left at
+        # zero (no repulsion) rather than clamped to the last covered row's
+        # coefficients, which JAX would otherwise do silently.
+        log.warning(
+            "NLH coefficients only cover elements up to Z=%d; elements up to "
+            "the model's supported Z=%d will have zero NLH repulsion.",
+            max_covered_z,
+            n_species - 1,
+        )
     a = np.zeros((n_species, n_species, 3))
     b = np.zeros((n_species, n_species, 3))
     a[z1, z2] = a[z2, z1] = d[:, [2, 4, 6]]
@@ -167,6 +178,11 @@ class ModelBuilder:
     def build_property_heads(self, apply_mask: bool = True):
         property_heads = []
         for head in self.config["property_heads"]:
+            head = {
+                "use_bias": self.config["use_bias"],
+                "readout_activation": self.config["readout_activation"],
+                **head,
+            }
             readout = self.build_readout(head)
             phead = PropertyHead(
                 pname=head["name"],
@@ -186,7 +202,7 @@ class ModelBuilder:
             if name == "nlh":
                 # dependency injection: load per-pair coeffs into arrays here
                 path = correction.pop("coeffs_file", None) or DEFAULT_NLH_COEFFS
-                a, b = load_nlh_coeffs(path)
+                a, b = load_nlh_coeffs(path, n_species=self.n_species)
                 correction["a"], correction["b"] = a, b
             Correction = all_corrections[name]
             corr = Correction(
