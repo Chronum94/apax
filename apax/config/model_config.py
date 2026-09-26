@@ -259,6 +259,9 @@ class GMNNConfig(BaseModelConfig, extra="forbid"):
         How many gaussian moment contractions to use.
     emb_init : Optional[str], default = "uniform"
         Initialization scheme for embedding layer weights.
+    radial_rank : Optional[PositiveInt], default = None
+        If set, replaces the dense species-pair radial coefficient table with a
+        rank-`radial_rank` CP factorization over per-element embeddings.
     """
 
     name: Literal["gmnn"] = "gmnn"
@@ -266,6 +269,10 @@ class GMNNConfig(BaseModelConfig, extra="forbid"):
     n_radial: PositiveInt = 5
     n_contr: int = 8
     emb_init: Optional[str] = "uniform"
+    radial_rank: Optional[PositiveInt] = None
+    radial_emb_jitter: NonNegativeFloat = 0.1
+    radial_factor_mode: Literal["cp", "centre", "nbr"] = "cp"
+    radial_residual: bool = False
 
     def get_builder(self):
         from apax.nn.builder import GMNNBuilder
