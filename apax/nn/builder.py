@@ -57,6 +57,7 @@ from apax.nn.models import (
     FeatureModel,
     ShallowEnsembleModel,
 )
+from apax.utils.convert import str_to_dtype
 
 log = logging.getLogger(__name__)
 
@@ -238,6 +239,7 @@ class ModelBuilder:
             corrections=corrections,
             init_box=init_box,
             inference_disp_fn=inference_disp_fn,
+            distance_dtype=str_to_dtype(self.config.get("distance_dtype", "fp64")),
         )
         return model
 
@@ -310,6 +312,7 @@ class ModelBuilder:
             should_average=should_average,
             init_box=init_box,
             inference_disp_fn=inference_disp_fn,
+            distance_dtype=str_to_dtype(self.config.get("distance_dtype", "fp64")),
             mask_atoms=True,
         )
         return model
@@ -326,6 +329,7 @@ class GMNNBuilder(ModelBuilder):
             n_contr=self.config["n_contr"],
             dtype=self.config["descriptor_dtype"],
             apply_mask=apply_mask,
+            nbr_rows=self.config.get("nbr_rows", 0),
         )
         return descriptor
 

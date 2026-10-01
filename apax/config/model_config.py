@@ -4,6 +4,7 @@ from pydantic import (
     BaseModel,
     Field,
     NonNegativeFloat,
+    NonNegativeInt,
     PositiveFloat,
     PositiveInt,
 )
@@ -219,6 +220,9 @@ class BaseModelConfig(BaseModel, extra="forbid"):
         Data type for readout calculations.
     scale_shift_dtype : Literal["fp32", "fp64"], default = "fp64"
         Data type for scale and shift parameters.
+    distance_dtype : Literal["fp32", "fp64"], default = "fp64"
+        Data type of positions and pair displacements. fp32 makes the force
+        accumulation (backward of the position gathers) fp32.
     """
 
     basis: BasisConfig = Field(BesselBasisConfig(name="bessel"), discriminator="name")
@@ -245,6 +249,7 @@ class BaseModelConfig(BaseModel, extra="forbid"):
     descriptor_dtype: Literal["fp32", "fp64"] = "fp32"
     readout_dtype: Literal["fp32", "fp64"] = "fp32"
     scale_shift_dtype: Literal["fp32", "fp64"] = "fp64"
+    distance_dtype: Literal["fp32", "fp64"] = "fp64"
 
 
 class GMNNConfig(BaseModelConfig, extra="forbid"):
@@ -259,6 +264,10 @@ class GMNNConfig(BaseModelConfig, extra="forbid"):
         How many gaussian moment contractions to use.
     emb_init : Optional[str], default = "uniform"
         Initialization scheme for embedding layer weights.
+    nbr_rows : NonNegativeInt, default = 0
+        Neighbours per atom K of the padded-row moment layout (no atomic scatters).
+        Pairs beyond K are dropped, so K must cover the densest atom.
+        0 keeps the sparse segment-sum layout.
     """
 
     name: Literal["gmnn"] = "gmnn"
@@ -266,6 +275,7 @@ class GMNNConfig(BaseModelConfig, extra="forbid"):
     n_radial: PositiveInt = 5
     n_contr: int = 8
     emb_init: Optional[str] = "uniform"
+    nbr_rows: NonNegativeInt = 0
 
     def get_builder(self):
         from apax.nn.builder import GMNNBuilder

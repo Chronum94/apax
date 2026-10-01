@@ -23,7 +23,7 @@ def get_disp_fn(displacement):
     return disp_fn
 
 
-def make_distance_fn(init_box, inference_disp_fn=None):
+def make_distance_fn(init_box, inference_disp_fn=None, dtype=jnp.float64):
     """Model which post processes the output of an atomistic model and
     adds empirical energy terms.
     """
@@ -45,7 +45,8 @@ def make_distance_fn(init_box, inference_disp_fn=None):
         idx_i, idx_j = idx[0], idx[1]
 
         # R shape n_atoms x 3
-        R = R.astype(jnp.float64)
+        # fp32 here makes the force accumulation (VJP of the R gathers) fp32
+        R = R.astype(dtype)
         Ri = R[idx_i]
         Rj = R[idx_j]
 
