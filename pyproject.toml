@@ -66,6 +66,7 @@ openmm = [
 [dependency-groups]
 dev = [
     "coverage>=7.6.10",
+    "hypothesis>=6.100.0",
     "matplotlib>=3.10.0",
     "pre-commit>=4.0.1",
     "pytest>=8.3.4",
