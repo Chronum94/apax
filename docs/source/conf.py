@@ -13,6 +13,7 @@ import apax
 
 sys.path.insert(0, os.path.abspath("."))
 sys.path.insert(0, os.path.abspath("../../"))
+sys.path.insert(0, os.path.abspath("_ext"))
 
 project = "Apax"
 copyright = "2025, Moritz Schäfer, Nico Segreto, Fabian Zills, Johannes Kästner"
@@ -31,10 +32,16 @@ extensions = [
     "nbsphinx",
     "nbsphinx_link",
     "sphinx.ext.viewcode",
+    "myst_parser",
+    "sphinx_design",
+    "config_tables",
 ]
 
+myst_enable_extensions = ["colon_fence", "deflist", "fieldlist"]
+myst_heading_anchors = 3
+
 templates_path = ["_templates"]
-exclude_patterns = []
+exclude_patterns = ["reference/_generated/*"]  # included from reference pages
 
 
 # -- Options for HTML output -------------------------------------------------
@@ -42,4 +49,9 @@ exclude_patterns = []
 
 html_theme = "furo"
 
-html_theme_options = {}
+html_title = f"apax {release}"
+html_theme_options = {
+    "source_repository": "https://github.com/apax-hub/apax/",
+    "source_branch": "main",
+    "source_directory": "docs/source/",
+}

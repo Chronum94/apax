@@ -1,5 +1,5 @@
-Modules
-=======
+Python API
+==========
 
 .. toctree::
    :maxdepth: 2
