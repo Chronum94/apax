@@ -115,7 +115,32 @@ def remove_constrained_dof(init_fn, n_constrained_dof):
     return wrapped_init_fn
 
 
-def get_ensemble(ensemble: Integrator, sim_fns, n_constrained_dof=0):
+def nvt_langevin_baoab(energy_fn, shift_fn, dt, kT, gamma, constrain_fn):
+    """BAOAB Langevin built from jax_md's primitives.
+    `jax_md.simulate.nvt_langevin` gives the O-step noise to constrained atoms,
+    which then move in the second A step before the force call. Applying the
+    constraints right after O keeps them in place.
+    """
+    init_fn, _ = simulate.nvt_langevin(energy_fn, shift_fn, dt, kT, gamma=gamma)
+    force_fn = quantity.canonicalize_force(energy_fn)
+
+    def apply_fn(state, **kwargs):
+        _kT = kwargs.pop("kT", kT)
+        dt_2 = dt / 2
+        state = simulate.momentum_step(state, dt_2)
+        state = simulate.position_step(state, shift_fn, dt_2, **kwargs)
+        state = simulate.stochastic_step(state, dt, _kT, gamma)
+        state = constrain_fn(state)
+        state = simulate.position_step(state, shift_fn, dt_2, **kwargs)
+        state = state.set(force=force_fn(state.position, **kwargs))
+        return simulate.momentum_step(state, dt_2)
+
+    return init_fn, apply_fn
+
+
+def get_ensemble(
+    ensemble: Integrator, sim_fns, n_constrained_dof=0, constrain_fn=lambda state: state
+):
     energy, shift = sim_fns.energy_fn, sim_fns.shift_fn
 
     dt = ensemble.dt * units.fs
@@ -138,6 +163,11 @@ def get_ensemble(ensemble: Integrator, sim_fns, n_constrained_dof=0):
         )
         if n_constrained_dof:
             init_fn = remove_constrained_dof(init_fn, n_constrained_dof)
+
+    elif ensemble.name == "langevin":
+        init_fn, apply_fn = nvt_langevin_baoab(
+            energy, shift, dt, kT(0), ensemble.friction / units.fs, constrain_fn
+        )
 
     elif ensemble.name == "npt":
         if n_constrained_dof:
@@ -162,7 +192,7 @@ def get_ensemble(ensemble: Integrator, sim_fns, n_constrained_dof=0):
         nbr_options = nbr_update_options_npt
     else:
         raise NotImplementedError(
-            "Only the NVE and Nose Hoover NVT/NPT thermostats are currently interfaced."
+            "Only NVE, Langevin NVT and Nose Hoover NVT/NPT are currently interfaced."
         )
 
     return init_fn, apply_fn, kT, nbr_options
@@ -329,7 +359,7 @@ def run_sim(
     n_constrained_dof = 3 * len(constrained_idxs)
     n_dof = system.positions.size - n_constrained_dof
     init_fn, apply_fn, kT, nbr_options = get_ensemble(
-        ensemble, sim_fns, n_constrained_dof
+        ensemble, sim_fns, n_constrained_dof, apply_constraints
     )
 
     neighbor = sim_fns.neighbor_fn.allocate(
