@@ -37,6 +37,31 @@ def maybe_vmap(apply, params):
     return energy_fn
 
 
+def build_energy_fn(
+    atoms: ase.Atoms,
+    config: Config,
+    params,
+    displacement_fn: Callable | None = None,
+    calc_stress: bool | None = None,
+    calc_hessian: bool | None = None,
+    force_variance: bool | None = None,
+):
+    box = np.asarray(atoms.cell.array, dtype=np.float64).T
+    n_species = 119  # int(np.max(Z) + 1)
+    Builder = config.model.get_builder()
+    builder = Builder(config.model.model_dump(), n_species=n_species)
+
+    model = builder.build_energy_derivative_model(
+        apply_mask=True,
+        init_box=box,
+        inference_disp_fn=displacement_fn,
+        calc_stress=calc_stress,
+        calc_hessian=calc_hessian,
+        force_variance=force_variance,
+    )
+    return maybe_vmap(model.apply, params)
+
+
 def build_energy_neighbor_fns(
     atoms: ase.Atoms,
     config: Config,
@@ -70,42 +95,16 @@ def build_energy_neighbor_fns(
             format=partition.Sparse,
         )
 
-    n_species = 119  # int(np.max(Z) + 1)
-    Builder = config.model.get_builder()
-    builder = Builder(config.model.model_dump(), n_species=n_species)
-
-    model = builder.build_energy_derivative_model(
-        apply_mask=True,
-        init_box=np.array(box),
-        inference_disp_fn=displacement_fn,
+    energy_fn = build_energy_fn(
+        atoms,
+        config,
+        params,
+        displacement_fn,
         calc_stress=calc_stress,
         calc_hessian=calc_hessian,
         force_variance=force_variance,
     )
-
-    energy_fn = maybe_vmap(model.apply, params)
     return energy_fn, neighbor_fn
-
-
-def build_hessian_neighbor_fns(
-    atoms: ase.Atoms,
-    config: Config,
-    params,
-    dr_threshold: float,
-    neigbor_from_jax: bool,
-    calc_stress: bool | None = None,
-    force_variance: bool | None = None,
-):
-    return build_energy_neighbor_fns(
-        atoms,
-        config,
-        params,
-        dr_threshold,
-        neigbor_from_jax,
-        calc_stress=calc_stress,
-        calc_hessian=True,
-        force_variance=force_variance,
-    )
 
 
 def make_ensemble(model):
@@ -185,13 +184,11 @@ class ASECalculator(Calculator):
     def __init__(
         self,
         model_dir: Union[Path, list[Path]],
-        dr_threshold: float = 0.5,
         transformations: list[Callable] = [],
         padding_factor: float = 1.5,
         calc_stress: bool | None = None,
         calc_hessian: bool = False,
         force_variance: bool | None = None,
-        disable_cell_list: bool = False,
         **kwargs,
     ):
         """
@@ -201,15 +198,13 @@ class ASECalculator(Calculator):
             Path to a model directory of the form `.../directory/experiment`
             (see Config docs for details).
             If a list of model paths is provided, they will be ensembled.
-        dr_threshold:
-            Neighborlist skin for the JaxMD neighborlist.
         transformations:
             Function transformations applied on top of the EnergyDerivativeModel.
             Transfomrations are implemented under `apax.md.transformations`.
         padding_factor:
-            Multiple of the fallback vesin's amount of neighbors.
-            This NL will be padded to `len(neighbors) * padding_factor`
-            on NL initialization.
+            The vesin neighbor list is padded to `len(neighbors) * padding_factor`
+            on initialization, so moderate changes in the number of neighbors
+            do not trigger recompilation.
         calc_stress:
             Whether to calculate the stress tensor.
             Overrides the model config if provided.
@@ -219,14 +214,9 @@ class ASECalculator(Calculator):
         force_variance:
             Whether to calculate the force variance (for shallow ensembles).
             Overrides the model config if provided.
-        disable_cell_list:
-            Disable the cell list acceleration in the JaxMD neighborlist.
-            Required for gas-phase (non-periodic) simulations.
         """
         Calculator.__init__(self, **kwargs)
-        self.dr_threshold = dr_threshold
         self.transformations = transformations
-        self.disable_cell_list = disable_cell_list
 
         self.model_config, self.params = restore_parameters(model_dir)
 
@@ -245,7 +235,7 @@ class ASECalculator(Calculator):
 
         self.step = None
         self.hessian_step = None
-        self.neighbor_fn = None
+        self.is_periodic = None
         self.neighbors = None
         self.offsets = None
         self.model = None
@@ -319,71 +309,40 @@ class ASECalculator(Calculator):
                 all_properties.append(p)
 
     def initialize(self, atoms):
-        box = jnp.asarray(atoms.cell.array, dtype=jnp.float64)
         self.r_max = self.model_config.model.basis.r_max
-        self.neigbor_from_jax = neighbor_calculable_with_jax(box, self.r_max)
-        model, neighbor_fn = build_energy_neighbor_fns(
+        self.is_periodic = is_periodic(atoms)
+        model = build_energy_fn(
             atoms,
             self.model_config,
             self.params,
-            self.dr_threshold,
-            self.neigbor_from_jax,
-            disable_cell_list=self.disable_cell_list,
             calc_stress=self.calc_stress,
             calc_hessian=self.calc_hessian,
             force_variance=self.force_variance,
         )
-
-        model = self._wrap_model(model)
-
-        self.model = model
-        self.step = get_step_fn(
-            model,
-            jnp.asarray(atoms.numbers),
-            bool(np.any(atoms.cell.array > 1e-6)),
-            self.neigbor_from_jax,
-        )
+        self.model = self._wrap_model(model)
+        self.step = get_step_fn(self.model, jnp.asarray(atoms.numbers))
         self.hessian_step = None
 
-        self.neighbor_fn = neighbor_fn
-
-        if self.neigbor_from_jax:
-            positions = jnp.asarray(atoms.positions, dtype=jnp.float64)
-            if np.any(atoms.get_cell().lengths() > 1e-6):
-                box = atoms.cell.array.T
-                inv_box = jnp.linalg.inv(box)
-                positions = transform(inv_box, positions)  # frac coords
-                self.neighbors = self.neighbor_fn.allocate(positions, box=box)
-            else:
-                self.neighbors = self.neighbor_fn.allocate(positions)
-        else:
-            calculator = NeighborList(cutoff=self.r_max, full_list=True)
-
-            (idxs_i,) = calculator.compute(
-                points=atoms.positions,
-                box=atoms.cell.array,
-                periodic=bool(np.any(atoms.pbc)),
-                quantities="i",
-            )
-            self.padded_length = int(len(idxs_i) * self.padding_factor)
+        calculator = NeighborList(cutoff=self.r_max, full_list=True)
+        (idxs_i,) = calculator.compute(
+            points=atoms.positions,
+            box=atoms.cell.array,
+            periodic=bool(np.any(atoms.pbc)),
+            quantities="i",
+        )
+        self.padded_length = int(len(idxs_i) * self.padding_factor)
 
     def _initialize_hessian(self, atoms):
-        hessian_model, _ = build_hessian_neighbor_fns(
+        hessian_model = build_energy_fn(
             atoms,
             self.model_config,
             self.params,
-            self.dr_threshold,
-            self.neigbor_from_jax,
             calc_stress=self.calc_stress,
+            calc_hessian=True,
             force_variance=self.force_variance,
         )
         hessian_model = self._wrap_model(hessian_model)
-        self.hessian_step = get_step_fn(
-            hessian_model,
-            jnp.asarray(atoms.numbers),
-            bool(np.any(atoms.cell.array > 1e-6)),
-            self.neigbor_from_jax,
-        )
+        self.hessian_step = get_step_fn(hessian_model, jnp.asarray(atoms.numbers))
 
     def get_descriptors(
         self,
@@ -488,38 +447,22 @@ class ASECalculator(Calculator):
         elif "numbers" in system_changes:
             self.initialize(atoms)
 
-        elif "cell" in system_changes:
-            neigbor_from_jax = neighbor_calculable_with_jax(box, self.r_max)
-            if self.neigbor_from_jax != neigbor_from_jax:
-                self.initialize(atoms)
+        elif "cell" in system_changes and is_periodic(atoms) != self.is_periodic:
+            # the model is built for either gas-phase or periodic inputs
+            self.initialize(atoms)
 
-        # predict
-        if self.neigbor_from_jax:
-            results, self.neighbors = self.step(positions, self.neighbors, box)
+        self.set_neighbours_and_offsets(atoms, box)
+        if self.is_periodic:
+            positions = transform(jnp.linalg.inv(box), positions)
 
-            if self.neighbors.did_buffer_overflow:
-                print("neighbor list overflowed, reallocating.")
-                self.initialize(atoms)
-                results, self.neighbors = self.step(positions, self.neighbors, box)
-
-            if "hessian" in properties and "hessian" not in results:
-                if self.hessian_step is None:
-                    self._initialize_hessian(atoms)
-                hessian_results, _ = self.hessian_step(positions, self.neighbors, box)
-                results["hessian"] = hessian_results["hessian"]
-
-        else:
-            self.set_neighbours_and_offsets(atoms, box)
-            positions = np.array(transform(np.linalg.inv(box), atoms.positions))
-
-            results = self.step(positions, self.neighbors, box, self.offsets)
-            if "hessian" in properties and "hessian" not in results:
-                if self.hessian_step is None:
-                    self._initialize_hessian(atoms)
-                hessian_results = self.hessian_step(
-                    positions, self.neighbors, box, self.offsets
-                )
-                results["hessian"] = hessian_results["hessian"]
+        results = self.step(positions, self.neighbors, box, self.offsets)
+        if "hessian" in properties and "hessian" not in results:
+            if self.hessian_step is None:
+                self._initialize_hessian(atoms)
+            hessian_results = self.hessian_step(
+                positions, self.neighbors, box, self.offsets
+            )
+            results["hessian"] = hessian_results["hessian"]
 
         self.results = {k: np.array(v, dtype=np.float64) for k, v in results.items()}
         self.results["energy"] = self.results["energy"].item()
@@ -655,8 +598,15 @@ def neighbor_calculable_with_jax(box: np.ndarray, r_max: float) -> bool:
             return False
 
 
+def is_periodic(atoms: ase.Atoms) -> bool:
+    return bool(np.any(atoms.cell.array > 1e-6))
+
+
 def get_step_fn(
-    model: Callable, Z: jnp.ndarray, atoms_is_periodic: bool, neigbor_from_jax: bool
+    model: Callable,
+    Z: jnp.ndarray,
+    atoms_is_periodic: bool = False,
+    neigbor_from_jax: bool = False,
 ) -> Callable:
     if neigbor_from_jax:
 
