@@ -57,7 +57,6 @@ class ApaxOptimizeHyperparameters(zntrack.Node):
 
     train_log_level: str = zntrack.params("info")
     optuna_log_level: str = zntrack.params("info")
-    nl_skin: float = zntrack.params(0.5)
 
     train_data_file: pathlib.Path = zntrack.outs_path(zntrack.nwd / "train_atoms.h5")
     validation_data_file: pathlib.Path = zntrack.outs_path(zntrack.nwd / "val_atoms.h5")
@@ -304,7 +303,6 @@ class ApaxOptimizeHyperparameters(zntrack.Node):
         with self.state.use_tmp_path():
             calc = ASECalculator(
                 model_dir=self.get_trial_directory(best_trial_number),
-                dr_threshold=self.nl_skin,
             )
             return calc
 

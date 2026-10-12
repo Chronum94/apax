@@ -58,8 +58,6 @@ class Apax(ApaxBase):
     config: str = zntrack.params_path()
     validation_data: list[ase.Atoms] = zntrack.deps()
     model: t.Optional[ApaxBase] = zntrack.deps(None)
-    nl_skin: float = zntrack.params(0.5)
-    disable_cell_list: bool = zntrack.params(False)
     log_level: str = zntrack.params("info")
 
     model_directory: pathlib.Path = zntrack.outs_path(zntrack.nwd / "apax_model")
@@ -127,8 +125,6 @@ class Apax(ApaxBase):
         with self.state.use_tmp_path():
             calc = ASECalculator(
                 model_dir=self.model_directory,
-                dr_threshold=self.nl_skin,
-                disable_cell_list=self.disable_cell_list,
             )
             return calc
 
@@ -152,9 +148,7 @@ class ApaxApplyTransformation(ApaxBase):
         with self.model.state.use_tmp_path():
             calc = ASECalculator(
                 model_dir=self.model_directory,
-                dr_threshold=self.model.nl_skin,
                 transformations=self.transformations,
-                disable_cell_list=getattr(self.model, "disable_cell_list", False),
             )
             return calc
 
@@ -166,13 +160,9 @@ class ApaxEnsemble(ApaxBase):
     ----------
     models: list
         List of `ApaxModel` nodes to ensemble.
-    nl_skin: float
-        Neighborlist skin.
     """
 
     models: list[Apax] = zntrack.deps()
-    nl_skin: float = zntrack.params(0.5)
-    disable_cell_list: bool = zntrack.params(False)
 
     def run(self) -> None:
         pass
@@ -190,8 +180,6 @@ class ApaxEnsemble(ApaxBase):
         with self.state.use_tmp_path():
             calc = ASECalculator(
                 param_files,
-                dr_threshold=self.nl_skin,
-                disable_cell_list=self.disable_cell_list,
             )
             return calc
 
@@ -203,12 +191,9 @@ class ApaxImport(zntrack.Node):
     ----------
     models: list
         List of `ApaxModel` nodes to ensemble.
-    nl_skin: float
-        Neighborlist skin.
     """
 
     config: str = zntrack.params_path()
-    nl_skin: float = zntrack.params(0.5)
 
     @property
     def parameter(self) -> dict:
@@ -230,7 +215,6 @@ class ApaxImport(zntrack.Node):
         with self.state.use_tmp_path():
             calc = ASECalculator(
                 model_dir,
-                dr=self.nl_skin,
             )
             return calc
 
@@ -270,9 +254,6 @@ class ApaxCalibrate(ApaxBase):
     optimizer_bounds: t.Tuple[float, float] = zntrack.params((1e-2, 1e2))
 
     transformations: t.Optional[list[dict[str, dict]]] = zntrack.params(None)
-
-    nl_skin: float = zntrack.params(0.5)
-    disable_cell_list: bool = zntrack.params(False)
 
     metrics: dict = zntrack.metrics()
 
@@ -327,8 +308,6 @@ class ApaxCalibrate(ApaxBase):
         with self.model.state.use_tmp_path():
             calc = ASECalculator(
                 model_dir=self.model_directory,
-                dr_threshold=self.model.nl_skin,
                 transformations=transformations,
-                disable_cell_list=self.disable_cell_list,
             )
             return calc
