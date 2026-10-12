@@ -26,6 +26,14 @@ from apax.md.constraints import Constraint, ConstraintBase
 from apax.md.dynamics_checks import DynamicsCheckBase, DynamicsChecks
 from apax.md.io import H5TrajHandler, TrajHandler, truncate_trajectory_to_checkpoint
 from apax.md.md_checkpoint import load_md_state
+from apax.md.replicas import (
+    add_replica_axis,
+    allocate_neighbors,
+    make_neighbor_update,
+    replica_slice,
+    select_replicas,
+    shard_replicas,
+)
 from apax.md.sim_utils import SimulationFunctions, System
 from apax.train.checkpoints import (
     canonicalize_energy_model_parameters,
@@ -202,31 +210,41 @@ def get_ensemble(
 def handle_checkpoints(state, step, system, load_momenta, ckpt_dir, should_load_ckpt):
     if load_momenta and not should_load_ckpt:
         log.info("loading momenta from starting configuration")
-        state = state.set(momentum=system.momenta)
+        momenta = jnp.broadcast_to(system.momenta, state.momentum.shape)
+        state = state.set(momentum=momenta)
 
     elif should_load_ckpt:
         state, step = load_md_state(state, ckpt_dir.resolve())
     return state, step
 
 
-def create_evaluation_functions(traj_handler, aux_fn, Z, dynamics_checks):
-    def on_eval(state, neighbor, box, nbr_kwargs):
+def create_evaluation_functions(traj_handlers, aux_fn, Z, dynamics_checks):
+    """Evaluate every replica and hand each its own slice of the results."""
+
+    def evaluate(state, neighbor, box):
         # sized per call: a reallocated neighbor list has a different capacity
         offsets = jnp.zeros((neighbor.idx.shape[1], 3))
         positions = state.position
         predictions = aux_fn(positions, Z, neighbor, box, offsets)
-        all_checks_passed = True
+        all_checks_passed = jnp.array(True)
 
         for check in dynamics_checks:
             check_passed = check.check(predictions, positions, box)
             all_checks_passed = all_checks_passed & check_passed
 
-        io_callback(traj_handler.step, None, (state, predictions, nbr_kwargs))
+        return predictions, all_checks_passed
+
+    def write(samples):
+        for k, handler in enumerate(traj_handlers):
+            handler.step(replica_slice(samples, k))
+
+    def on_eval(state, neighbor, box, nbr_kwargs):
+        predictions, all_checks_passed = jax.vmap(evaluate)(state, neighbor, box)
+        io_callback(write, None, (state, predictions, nbr_kwargs))
         return all_checks_passed
 
     def no_eval(state, neighbor, box, nbr_kwargs):
-        all_checks_passed = True
-        return all_checks_passed
+        return jnp.ones(len(traj_handlers), dtype=bool)
 
     return on_eval, no_eval
 
@@ -267,23 +285,38 @@ def create_constraint_function(constraints: list[ConstraintBase], system):
 
 
 def check_for_nans(state, step):
-    if np.any(np.isnan(state.position)) or np.any(np.isnan(state.velocity)):
-        raise ValueError(f"NaN encountered, simulation aborted after {step + 1} steps.")
+    position, velocity = np.asarray(state.position), np.asarray(state.velocity)
+    has_nan = np.isnan(position).any(axis=(1, 2)) | np.isnan(velocity).any(axis=(1, 2))
+    if np.any(has_nan):
+        replicas = np.flatnonzero(has_nan).tolist()
+        raise ValueError(
+            f"NaN encountered in replica(s) {replicas}, "
+            f"simulation aborted after {step + 1} steps."
+        )
 
 
 def needs_reallocation(neighbor):
     # A shrinking NPT box makes the cells smaller than the cutoff,
     # which silently drops neighbors without overflowing any buffer.
-    return bool(neighbor.did_buffer_overflow) or bool(neighbor.cell_size_too_small)
+    return bool(np.any(neighbor.did_buffer_overflow)) or bool(
+        np.any(neighbor.cell_size_too_small)
+    )
 
 
-def handle_overflow(neighbor_fn, state, nbr_options, extra_capacity, traj_handler, step):
+def neighbor_kwargs(state, nbr_options, is_npt):
+    return jax.vmap(nbr_options)(state) if is_npt else {}
+
+
+def handle_overflow(
+    neighbor_fn, state, nbr_options, is_npt, extra_capacity, fractional, step
+):
     with logging_redirect_tqdm():
         log.warning("step %d: neighbor list invalid, reallocating.", step)
-    traj_handler.reset_buffer()
-    return neighbor_fn.allocate(
-        state.position, extra_capacity=extra_capacity, **nbr_options(state)
+    nbr_kwargs = neighbor_kwargs(state, nbr_options, is_npt)
+    neighbors = allocate_neighbors(
+        neighbor_fn, state.position, nbr_kwargs, extra_capacity, fractional
     )
+    return shard_replicas(neighbors, len(state.position))
 
 
 def maybe_save_checkpoint(mngr, state, step, checkpoint_interval, sim_time_per_step):
@@ -314,7 +347,7 @@ def run_sim(
     n_inner: int,
     extra_capacity: int,
     rng_key: int,
-    traj_handler: TrajHandler,
+    traj_handler: TrajHandler | list[TrajHandler],
     sampling_rate: int = 10,
     load_momenta: bool = False,
     restart: bool = True,
@@ -322,9 +355,10 @@ def run_sim(
     dynamics_checks: list[DynamicsCheckBase] = [],
     constraints: list[ConstraintBase] = [],
     disable_pbar: bool = False,
+    n_replicas: int = 1,
 ):
     """
-    Performs NVT MD.
+    Performs MD on `n_replicas` independent copies of `system`.
 
     Parameters
     ----------
@@ -337,7 +371,10 @@ def run_sim(
     extra_capacity : int
         Extra capacity for the neighborlist.
     rng_key : int
-        RNG key used to initialize the simulation.
+        RNG key used to initialize the simulation. Replicas get keys split
+        from it; a single replica uses it as is.
+    traj_handler : TrajHandler | list[TrajHandler]
+        One trajectory handler per replica.
     restart : bool, default = True
         Whether a checkpoint should be loaded. No implemented yet.
     checkpoint_interval : int, default = 50_000
@@ -345,7 +382,20 @@ def run_sim(
         full simulation state checkpoints.
     sim_dir : Path
         Directory where the trajectory and simulation checkpoints will be saved.
+    n_replicas : int, default = 1
+        Number of independent replicas, run together in one jitted loop.
     """
+    traj_handlers = traj_handler if isinstance(traj_handler, list) else [traj_handler]
+    if len(traj_handlers) != n_replicas:
+        raise ValueError(
+            f"Got {len(traj_handlers)} trajectory handlers for {n_replicas} replicas."
+        )
+    if load_momenta and n_replicas > 1 and ensemble.name != "langevin":
+        raise ValueError(
+            "Replicas loading the same momenta in a deterministic ensemble "
+            "would all follow the same trajectory."
+        )
+    fractional = bool(np.any(system.box > 1e-6))
     neighbor_fn = sim_fns.neighbor_fn
     ckpt_dir = sim_dir / "ckpts"
     ckpt_dir.mkdir(exist_ok=True)
@@ -363,17 +413,23 @@ def run_sim(
         ensemble, sim_fns, n_constrained_dof, apply_constraints
     )
 
-    neighbor = sim_fns.neighbor_fn.allocate(
-        system.positions, extra_capacity=extra_capacity
-    )
+    positions = jnp.broadcast_to(system.positions, (n_replicas, *system.positions.shape))
+    neighbor = allocate_neighbors(neighbor_fn, positions, {}, extra_capacity, fractional)
 
-    state = init_fn(
-        rng_key,
-        system.positions,
-        box=system.box,
-        mass=system.masses,
-        neighbor=neighbor,
-    )
+    def init_replica(key, neighbor):
+        return init_fn(
+            key, system.positions, box=system.box, mass=system.masses, neighbor=neighbor
+        )
+
+    keys = rng_key[None] if n_replicas == 1 else jax.random.split(rng_key, n_replicas)
+    state = jax.vmap(init_replica)(keys, neighbor)
+
+    # Checkpoints of a single replica keep the unbatched layout.
+    def to_checkpoint(state):
+        return replica_slice(state, 0) if n_replicas == 1 else state
+
+    def from_checkpoint(state):
+        return add_replica_axis(state) if n_replicas == 1 else state
 
     step = 0
 
@@ -384,25 +440,43 @@ def run_sim(
 
     should_load_ckpt = restart and ckpts_exist
     state, step = handle_checkpoints(
-        state, step, system, load_momenta, ckpt_dir, should_load_ckpt
+        to_checkpoint(state), step, system, load_momenta, ckpt_dir, should_load_ckpt
     )
+    state = from_checkpoint(state)
     if should_load_ckpt:
         length = step * n_inner
-        truncate_trajectory_to_checkpoint(traj_handler.traj_path, length)
+        for handler in traj_handlers:
+            truncate_trajectory_to_checkpoint(handler.traj_path, length)
 
     initial_step = step  # used for measuring time correctly
     is_npt = isinstance(state, simulate.NPTNoseHooverState)
+    state, neighbor = shard_replicas((state, neighbor), n_replicas)
+    update_neighbors = make_neighbor_update(
+        n_replicas, fractional, sim_fns.dr_threshold, sim_fns.r_max
+    )
+    boxes = jnp.broadcast_to(system.box, (n_replicas, *jnp.shape(system.box)))
 
     n_outer = int(np.ceil(n_steps / n_inner))
     pbar_update_freq = int(np.ceil(500 / n_inner))
     pbar_increment = n_inner * pbar_update_freq
 
     on_eval, no_eval = create_evaluation_functions(
-        traj_handler,
+        traj_handlers,
         sim_fns.auxiliary_fn,
         system.atomic_numbers,
         dynamics_checks,
     )
+
+    def advance(state, neighbor, kT):
+        apply_fn_kwargs = {"kT": kT}
+        if not is_npt:
+            apply_fn_kwargs["box"] = system.box
+        state = apply_fn(state, neighbor=neighbor, **apply_fn_kwargs)
+        return apply_constraints(state)
+
+    def temperature(state):
+        kinetic_energy = quantity.kinetic_energy(velocity=state.velocity, mass=state.mass)
+        return 2 * kinetic_energy / n_dof / units.kB
 
     @jax.jit
     def sim(state, outer_step, neighbor):  # TODO make more modular
@@ -410,21 +484,12 @@ def run_sim(
             state, outer_step, neighbor, all_checks_passed = state
             step = i + outer_step * n_inner
 
-            apply_fn_kwargs = {}
-            if isinstance(state, simulate.NPTNoseHooverState):
-                box = state.box
-            else:
-                box = system.box
-                apply_fn_kwargs = {"box": box}
+            state = jax.vmap(advance, (0, 0, None))(state, neighbor, kT(step))
+            box = jax.vmap(lambda s: s.box)(state) if is_npt else boxes
 
-            apply_fn_kwargs["kT"] = kT(step)  # Get current Temperature
-
-            state = apply_fn(state, neighbor=neighbor, **apply_fn_kwargs)
-
-            state = apply_constraints(state)
-
-            nbr_kwargs = nbr_options(state)
-            neighbor = neighbor.update(state.position, **nbr_kwargs)
+            nbr_kwargs = neighbor_kwargs(state, nbr_options, is_npt)
+            nbr_boxes = nbr_kwargs["box"] if is_npt else boxes
+            neighbor = update_neighbors(neighbor, state.position, nbr_kwargs, nbr_boxes)
 
             condition = step % sampling_rate == 0
             checks_passed = jax.lax.cond(
@@ -434,12 +499,11 @@ def run_sim(
             all_checks_passed = all_checks_passed & checks_passed
             return state, outer_step, neighbor, all_checks_passed
 
-        all_checks_passed = True
+        all_checks_passed = jnp.ones(n_replicas, dtype=bool)
         state, outer_step, neighbor, all_checks_passed = jax.lax.fori_loop(
             0, n_inner, body_fn, (state, outer_step, neighbor, all_checks_passed)
         )
-        kinetic_energy = quantity.kinetic_energy(velocity=state.velocity, mass=state.mass)
-        current_temperature = 2 * kinetic_energy / n_dof / units.kB
+        current_temperature = jax.vmap(temperature)(state)
 
         return state, neighbor, current_temperature, all_checks_passed
 
@@ -468,46 +532,58 @@ def run_sim(
                 # Size the list for where the chunk ended up (densest
                 # configuration / smallest NPT box), then redo the chunk.
                 # Sizing it from `state` would overflow again on the retry.
-                finite = np.all(np.isfinite(new_state.position))
+                finite = np.isfinite(np.asarray(new_state.position)).all(axis=(1, 2))
                 neighbor = handle_overflow(
                     neighbor_fn,
-                    new_state if finite else state,
+                    select_replicas(finite, new_state, state),
                     nbr_options,
+                    is_npt,
                     extra_capacity,
-                    traj_handler,
+                    fractional,
                     step,
                 )
+                for handler in traj_handlers:
+                    handler.reset_buffer()
                 continue
 
             check_for_nans(new_state, step)
 
-            if not all_checks_passed:
+            if not np.all(all_checks_passed):
+                failed = np.flatnonzero(~np.asarray(all_checks_passed)).tolist()
                 with logging_redirect_tqdm():
                     log.critical(
-                        "One or more dynamics checks failed at step: %d", step + 1
+                        "One or more dynamics checks failed at step %d in replica(s) %s",
+                        step + 1,
+                        failed,
                     )
                 break
 
             state = new_state
             step += 1
             if is_npt and sim_fns.r_max is not None:
-                check_minimum_image(simulate.npt_box(state), sim_fns.r_max)
+                for box in np.asarray(jax.vmap(simulate.npt_box)(state)):
+                    check_minimum_image(box, sim_fns.r_max)
             maybe_save_checkpoint(
-                mngr, state, step, checkpoint_interval, sim_time_per_step
+                mngr, to_checkpoint(state), step, checkpoint_interval, sim_time_per_step
             )
             maybe_update_pbar(
-                sim_pbar, step, pbar_update_freq, pbar_increment, current_temperature
+                sim_pbar,
+                step,
+                pbar_update_freq,
+                pbar_increment,
+                float(np.mean(current_temperature)),
             )
 
         # In case of mismatch update freq and n_steps, we can set it to 100% manually
         sim_pbar.update(n_steps - sim_pbar.n)
         sim_pbar.close()
 
-        ckpt = {"state": state, "step": step}
+        ckpt = {"state": to_checkpoint(state), "step": step}
         mngr.save(step, args=ocp.args.StandardSave(ckpt))
 
-    traj_handler.write()
-    traj_handler.close()
+    for handler in traj_handlers:
+        handler.write()
+        handler.close()
     end = time.time()
     elapsed_wall_time = end - start
     elapsed_sim_time = (step - initial_step) * n_inner * ensemble.dt / 1000
@@ -516,7 +592,7 @@ def run_sim(
     nanosec_per_day = ps_per_s / 1e3 * 60 * 60 * 24
 
     sec_per_step = elapsed_wall_time / n_steps
-    n_atoms = system.positions.shape[0]
+    n_atoms = system.positions.shape[0] * n_replicas
     musec_per_step_per_atom = sec_per_step * 1e6 / n_atoms
 
     log.info("simulation finished after: %.2f s", elapsed_wall_time)
@@ -648,7 +724,9 @@ def md_setup(model_config: Config, md_config: MDConfig):
         energy_fn = apply_bias_energy(bias, energy_fn)
         auxiliary_fn = apply_bias_auxiliary(bias, auxiliary_fn)
 
-    sim_fns = SimulationFunctions(energy_fn, auxiliary_fn, shift_fn, neighbor_fn, r_max)
+    sim_fns = SimulationFunctions(
+        energy_fn, auxiliary_fn, shift_fn, neighbor_fn, r_max, md_config.dr_threshold
+    )
     return system, sim_fns
 
 
@@ -690,14 +768,25 @@ def run_md(model_config: Config, md_config: MDConfig, log_level="error"):
 
     n_steps = int(np.ceil(md_config.duration / md_config.ensemble.dt))
 
-    traj_handler = H5TrajHandler(
-        system,
-        md_config.buffer_size,
-        traj_path,
-        md_config.ensemble.dt,
-        properties=md_config.properties,
-        h5md_options=md_config.h5md_options.model_dump(),
-    )
+    n_replicas = md_config.n_replicas
+    if n_replicas > 1:
+        traj_paths = [
+            traj_path.with_name(f"{traj_path.stem}_{k}{traj_path.suffix}")
+            for k in range(n_replicas)
+        ]
+    else:
+        traj_paths = [traj_path]
+    traj_handlers = [
+        H5TrajHandler(
+            system,
+            md_config.buffer_size,
+            path,
+            md_config.ensemble.dt,
+            properties=md_config.properties,
+            h5md_options=md_config.h5md_options.model_dump(),
+        )
+        for path in traj_paths
+    ]
     # TODO implement correct chunking
 
     run_sim(
@@ -709,7 +798,7 @@ def run_md(model_config: Config, md_config: MDConfig, log_level="error"):
         extra_capacity=md_config.extra_capacity,
         sampling_rate=md_config.sampling_rate,
         load_momenta=md_config.load_momenta,
-        traj_handler=traj_handler,
+        traj_handler=traj_handlers,
         rng_key=jax.random.PRNGKey(md_config.seed),
         restart=md_config.restart,
         checkpoint_interval=md_config.checkpoint_interval,
@@ -717,4 +806,5 @@ def run_md(model_config: Config, md_config: MDConfig, log_level="error"):
         dynamics_checks=dynamics_checks,
         constraints=constraints,
         disable_pbar=md_config.disable_pbar,
+        n_replicas=n_replicas,
     )

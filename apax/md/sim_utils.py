@@ -45,3 +45,4 @@ class SimulationFunctions:
     shift_fn: Callable
     neighbor_fn: Callable
     r_max: Optional[float] = None
+    dr_threshold: Optional[float] = None

@@ -23,7 +23,8 @@ from tests.conftest import load_config_and_run_training
 TEST_PATH = pathlib.Path(__file__).parent.resolve()
 
 
-def test_run_md(get_tmp_path):
+@pytest.mark.parametrize("n_replicas", [1, 3])
+def test_run_md(get_tmp_path, n_replicas):
     model_confg_path = TEST_PATH / "config.yaml"
     md_confg_path = TEST_PATH / "md_config.yaml"
 
@@ -35,11 +36,20 @@ def test_run_md(get_tmp_path):
     model_config_dict["data"]["directory"] = get_tmp_path.as_posix()
     md_config_dict["sim_dir"] = get_tmp_path.as_posix()
     md_config_dict["initial_structure"] = get_tmp_path.as_posix() + "/atoms.extxyz"
+    md_config_dict["n_replicas"] = n_replicas
 
     model_config = Config.model_validate(model_config_dict)
     os.makedirs(model_config.data.model_version_path)
     model_config.dump_config(model_config.data.model_version_path)
     md_config = MDConfig.model_validate(md_config_dict)
+    traj_name = pathlib.Path(md_config.traj_name)
+    if n_replicas == 1:
+        traj_paths = [pathlib.Path(md_config.sim_dir) / traj_name]
+    else:
+        traj_paths = [
+            pathlib.Path(md_config.sim_dir) / f"{traj_name.stem}_{k}{traj_name.suffix}"
+            for k in range(n_replicas)
+        ]
 
     positions = jnp.array(
         [
@@ -92,16 +102,19 @@ def test_run_md(get_tmp_path):
 
     run_md(model_config_dict, md_config_dict)
 
-    traj = znh5md.IO(md_config.sim_dir + "/" + md_config.traj_name)[:]
-    assert len(traj) == 5  # num steps
+    trajs = [znh5md.IO(path)[:] for path in traj_paths]
+    assert all(len(traj) == 5 for traj in trajs)  # num steps
+    if n_replicas > 1:
+        # replicas get their own momenta
+        assert not np.allclose(trajs[0][-1].positions, trajs[1][-1].positions)
 
     # checkpoint loading
     md_config_dict["duration"] = 0.5
 
     run_md(model_config_dict, md_config_dict)
 
-    traj = znh5md.IO(md_config.sim_dir + "/" + md_config.traj_name)[:]
-    assert len(traj) == 10  # num steps
+    trajs = [znh5md.IO(path)[:] for path in traj_paths]
+    assert all(len(traj) == 10 for traj in trajs)  # num steps
 
 
 def test_ase_calc(get_tmp_path):

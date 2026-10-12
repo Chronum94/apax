@@ -368,9 +368,14 @@ class MDConfig(BaseModel, frozen=True, extra="forbid"):
         | These will be loaded with the `restart` option.
     disable_pbar : bool, False
         | Disables the MD progressbar.
+    n_replicas : int, default = 1
+        | Number of independent replicas of the initial structure, run together.
+        | Each gets its own momenta and trajectory file (`<traj_name stem>_<k>.h5`).
+        | Replicas are spread over all devices when their number divides evenly.
     """
 
     seed: int = 1
+    n_replicas: PositiveInt = 1
 
     # https://docs.pydantic.dev/latest/usage/types/unions/#discriminated-unions-aka-tagged-unions
     ensemble: Union[NVEOptions, NVTOptions, LangevinOptions, NPTOptions] = Field(
