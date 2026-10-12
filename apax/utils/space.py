@@ -2,6 +2,7 @@
 `box` (the transpose of an ASE cell), so real positions are `box @ frac`."""
 
 import jax.numpy as jnp
+import numpy as np
 from jax import Array, custom_jvp
 
 
@@ -41,3 +42,11 @@ def distance(dR: Array) -> Array:
 def volume(box: Array) -> Array:
     """Signed volume of a `(3, 3)` box."""
     return jnp.linalg.det(box)
+
+
+def perpendicular_widths(box) -> np.ndarray:
+    """Distances between opposite faces of the cell spanned by the columns of `box`."""
+    box = np.asarray(box)
+    a, b, c = box.T
+    face_areas = np.linalg.norm([np.cross(b, c), np.cross(c, a), np.cross(a, b)], axis=1)
+    return abs(np.linalg.det(box)) / face_areas

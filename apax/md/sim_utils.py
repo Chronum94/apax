@@ -44,3 +44,4 @@ class SimulationFunctions:
     auxiliary_fn: Callable
     shift_fn: Callable
     neighbor_fn: Callable
+    r_max: Optional[float] = None

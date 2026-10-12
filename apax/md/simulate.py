@@ -32,6 +32,7 @@ from apax.train.checkpoints import (
     restore_parameters,
 )
 from apax.train.run import setup_logging
+from apax.utils.space import perpendicular_widths
 
 log = logging.getLogger(__name__)
 
@@ -78,18 +79,18 @@ def create_energy_fn(
     return energy_fn
 
 
-def heights_of_box_sides(box):
-    heights = []
-
-    for i in range(len(box)):
-        for j in range(i + 1, len(box)):
-            area = np.linalg.norm(np.cross(box[i], box[j]))
-            height = area / np.linalg.norm(box[i])
-            heights.append(height)
-            height = area / np.linalg.norm(box[j])
-            heights.append(height)
-
-    return np.array(heights)
+def check_minimum_image(box, r_max):
+    """jax_md's periodic displacement uses the minimum image convention,
+    which only finds every neighbor if the cutoff is below half of each
+    perpendicular cell width.
+    """
+    half_width = np.min(perpendicular_widths(box)) / 2
+    if r_max >= half_width:
+        raise ValueError(
+            f"Cutoff radius {r_max} is not smaller than half the smallest perpendicular "
+            f"cell width ({half_width:.3f}). jax_md's minimum image convention would "
+            "miss neighbors; use a larger supercell."
+        )
 
 
 def nbr_update_options_default(state):
@@ -390,6 +391,7 @@ def run_sim(
         truncate_trajectory_to_checkpoint(traj_handler.traj_path, length)
 
     initial_step = step  # used for measuring time correctly
+    is_npt = isinstance(state, simulate.NPTNoseHooverState)
 
     n_outer = int(np.ceil(n_steps / n_inner))
     pbar_update_freq = int(np.ceil(500 / n_inner))
@@ -488,6 +490,8 @@ def run_sim(
 
             state = new_state
             step += 1
+            if is_npt and sim_fns.r_max is not None:
+                check_minimum_image(simulate.npt_box(state), sim_fns.r_max)
             maybe_save_checkpoint(
                 mngr, state, step, checkpoint_interval, sim_time_per_step
             )
@@ -563,18 +567,7 @@ def md_setup(model_config: Config, md_config: MDConfig):
         displacement_fn, shift_fn = space.free()
     else:
         frac_coords = True
-        heights = heights_of_box_sides(system.box)
-
-        if np.any(atoms.cell.lengths() / 2 < r_max):
-            log.error(
-                f"Cutoff radius is larger than half the box in at least one cell vector direction: "
-                f"{r_max} > {np.min(atoms.cell.lengths()) / 2}. Cannot calculate correct neighbors."
-            )
-        if np.any(heights / 2 < r_max):
-            log.error(
-                f"Cutoff radius is larger than half the box in at least one cell vector direction: "
-                f"{r_max} > {np.min(heights) / 2}. Cannot calculate correct neighbors."
-            )
+        check_minimum_image(system.box, r_max)
 
         displacement_fn, shift_fn = space.periodic_general(
             system.box,
@@ -655,7 +648,7 @@ def md_setup(model_config: Config, md_config: MDConfig):
         energy_fn = apply_bias_energy(bias, energy_fn)
         auxiliary_fn = apply_bias_auxiliary(bias, auxiliary_fn)
 
-    sim_fns = SimulationFunctions(energy_fn, auxiliary_fn, shift_fn, neighbor_fn)
+    sim_fns = SimulationFunctions(energy_fn, auxiliary_fn, shift_fn, neighbor_fn, r_max)
     return system, sim_fns
 
 

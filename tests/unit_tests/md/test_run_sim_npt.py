@@ -1,6 +1,7 @@
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 from jax_md import partition, space
 
 from apax.config.md_config import NPTOptions
@@ -39,7 +40,7 @@ class RecordingTraj:
         pass
 
 
-def test_npt_compression_reallocates_neighbors(tmp_path):
+def run_compression(tmp_path, pressure, r_max=None):
     n_side, spacing = 4, 2.2
     L = n_side * spacing
     box = jnp.eye(3) * L
@@ -87,12 +88,14 @@ def test_npt_compression_reallocates_neighbors(tmp_path):
         fractional_coordinates=True,
         format=partition.Sparse,
     )
-    sim_fns = SimulationFunctions(energy_fn, auxiliary_fn, shift_fn, neighbor_fn)
+    sim_fns = SimulationFunctions(
+        energy_fn, auxiliary_fn, shift_fn, neighbor_fn, r_max=r_max
+    )
     ensemble = NPTOptions(
         name="npt",
         dt=1.0,
         temperature_schedule={"name": "constant", "T0": 300},
-        pressure=3e5,
+        pressure=pressure,
         barostat_chain={"tau": 50},
     )
     traj = RecordingTraj(tmp_path)
@@ -112,6 +115,18 @@ def test_npt_compression_reallocates_neighbors(tmp_path):
         disable_pbar=True,
     )
 
+    return traj, L
+
+
+def test_npt_compression_reallocates_neighbors(tmp_path):
+    traj, L = run_compression(tmp_path, pressure=3e5)
+
     assert traj.n_reallocations >= 1
     assert traj.box[0, 0] < 0.9 * L
     assert traj.max_missing_pairs == 0
+
+
+def test_npt_compression_below_minimum_image_raises(tmp_path):
+    # 3e6 bar shrinks the box to ~0.46 L = 4.1 A, below 2 * R_CUT
+    with pytest.raises(ValueError, match="minimum image"):
+        run_compression(tmp_path, pressure=3e6, r_max=R_CUT)
