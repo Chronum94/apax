@@ -101,7 +101,21 @@ def nbr_update_options_npt(state):
     return {"box": box}
 
 
-def get_ensemble(ensemble: Integrator, sim_fns, constaint_idxs=None):
+def remove_constrained_dof(init_fn, n_constrained_dof):
+    """jax_md sizes the thermostat chain for all 3N degrees of freedom.
+    Constrained ones carry no kinetic energy, so they are removed here.
+    The chain masses are recomputed from the corrected DOF at every step.
+    """
+
+    def wrapped_init_fn(*args, **kwargs):
+        state = init_fn(*args, **kwargs)
+        dof = state.chain.degrees_of_freedom - n_constrained_dof
+        return state.set(chain=state.chain.set(degrees_of_freedom=dof))
+
+    return wrapped_init_fn
+
+
+def get_ensemble(ensemble: Integrator, sim_fns, n_constrained_dof=0):
     energy, shift = sim_fns.energy_fn, sim_fns.shift_fn
 
     dt = ensemble.dt * units.fs
@@ -109,7 +123,8 @@ def get_ensemble(ensemble: Integrator, sim_fns, constaint_idxs=None):
 
     kT = ensemble.temperature_schedule.get_schedule()
     if ensemble.name == "nve":
-        init_fn, apply_fn = simulate.nve(energy, shift, kT(0), dt)
+        init_fn, apply_fn = simulate.nve(energy, shift, dt)
+        init_fn = partial(init_fn, kT=kT(0))
     elif ensemble.name == "nvt":
         thermostat_chain = dict(ensemble.thermostat_chain)
         thermostat_chain["tau"] *= dt
@@ -119,11 +134,13 @@ def get_ensemble(ensemble: Integrator, sim_fns, constaint_idxs=None):
             shift,
             dt,
             kT(0),
-            constrained_idxs=constaint_idxs,
+            **thermostat_chain,
         )
+        if n_constrained_dof:
+            init_fn = remove_constrained_dof(init_fn, n_constrained_dof)
 
     elif ensemble.name == "npt":
-        if constaint_idxs:
+        if n_constrained_dof:
             raise NotImplementedError(
                 "Constraining atoms in NPT simulations is not implemented."
             )
@@ -161,10 +178,10 @@ def handle_checkpoints(state, step, system, load_momenta, ckpt_dir, should_load_
     return state, step
 
 
-def create_evaluation_functions(traj_handler, aux_fn, Z, neighbor, dynamics_checks):
-    offsets = jnp.zeros((neighbor.idx.shape[1], 3))
-
+def create_evaluation_functions(traj_handler, aux_fn, Z, dynamics_checks):
     def on_eval(state, neighbor, box, nbr_kwargs):
+        # sized per call: a reallocated neighbor list has a different capacity
+        offsets = jnp.zeros((neighbor.idx.shape[1], 3))
         positions = state.position
         predictions = aux_fn(positions, Z, neighbor, box, offsets)
         all_checks_passed = True
@@ -223,11 +240,19 @@ def check_for_nans(state, step):
         raise ValueError(f"NaN encountered, simulation aborted after {step + 1} steps.")
 
 
-def handle_overflow(neighbor_fn, state, traj_handler, step):
+def needs_reallocation(neighbor):
+    # A shrinking NPT box makes the cells smaller than the cutoff,
+    # which silently drops neighbors without overflowing any buffer.
+    return bool(neighbor.did_buffer_overflow) or bool(neighbor.cell_size_too_small)
+
+
+def handle_overflow(neighbor_fn, state, nbr_options, extra_capacity, traj_handler, step):
     with logging_redirect_tqdm():
-        log.warning("step %d: neighbor list overflowed, reallocating.", step)
+        log.warning("step %d: neighbor list invalid, reallocating.", step)
     traj_handler.reset_buffer()
-    return neighbor_fn.allocate(state.position)
+    return neighbor_fn.allocate(
+        state.position, extra_capacity=extra_capacity, **nbr_options(state)
+    )
 
 
 def maybe_save_checkpoint(mngr, state, step, checkpoint_interval, sim_time_per_step):
@@ -300,7 +325,12 @@ def run_sim(
     )
 
     log.info("initializing simulation")
-    init_fn, apply_fn, kT, nbr_options = get_ensemble(ensemble, sim_fns, constrained_idxs)
+    # Each constrained index stands for 3 removed degrees of freedom.
+    n_constrained_dof = 3 * len(constrained_idxs)
+    n_dof = system.positions.size - n_constrained_dof
+    init_fn, apply_fn, kT, nbr_options = get_ensemble(
+        ensemble, sim_fns, n_constrained_dof
+    )
 
     neighbor = sim_fns.neighbor_fn.allocate(
         system.positions, extra_capacity=extra_capacity
@@ -339,7 +369,6 @@ def run_sim(
         traj_handler,
         sim_fns.auxiliary_fn,
         system.atomic_numbers,
-        neighbor,
         dynamics_checks,
     )
 
@@ -377,9 +406,8 @@ def run_sim(
         state, outer_step, neighbor, all_checks_passed = jax.lax.fori_loop(
             0, n_inner, body_fn, (state, outer_step, neighbor, all_checks_passed)
         )
-        current_temperature = (
-            quantity.temperature(velocity=state.velocity, mass=state.mass) / units.kB
-        )
+        kinetic_energy = quantity.kinetic_energy(velocity=state.velocity, mass=state.mass)
+        current_temperature = 2 * kinetic_energy / n_dof / units.kB
 
         return state, neighbor, current_temperature, all_checks_passed
 
@@ -404,7 +432,22 @@ def run_sim(
                 state, step, neighbor
             )
 
-            check_for_nans(state, step)
+            if needs_reallocation(neighbor):
+                # Size the list for where the chunk ended up (densest
+                # configuration / smallest NPT box), then redo the chunk.
+                # Sizing it from `state` would overflow again on the retry.
+                finite = np.all(np.isfinite(new_state.position))
+                neighbor = handle_overflow(
+                    neighbor_fn,
+                    new_state if finite else state,
+                    nbr_options,
+                    extra_capacity,
+                    traj_handler,
+                    step,
+                )
+                continue
+
+            check_for_nans(new_state, step)
 
             if not all_checks_passed:
                 with logging_redirect_tqdm():
@@ -412,10 +455,6 @@ def run_sim(
                         "One or more dynamics checks failed at step: %d", step + 1
                     )
                 break
-
-            if neighbor.did_buffer_overflow:
-                neighbor = handle_overflow(neighbor_fn, state, traj_handler, step)
-                continue
 
             state = new_state
             step += 1
