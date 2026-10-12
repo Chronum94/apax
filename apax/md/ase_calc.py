@@ -22,6 +22,7 @@ from apax.train.checkpoints import (
     check_for_ensemble,
     restore_parameters,
 )
+from apax.utils.space import transform
 
 
 def maybe_vmap(apply, params):
@@ -351,7 +352,7 @@ class ASECalculator(Calculator):
             if np.any(atoms.get_cell().lengths() > 1e-6):
                 box = atoms.cell.array.T
                 inv_box = jnp.linalg.inv(box)
-                positions = space.transform(inv_box, positions)  # frac coords
+                positions = transform(inv_box, positions)  # frac coords
                 self.neighbors = self.neighbor_fn.allocate(positions, box=box)
             else:
                 self.neighbors = self.neighbor_fn.allocate(positions)
@@ -509,7 +510,7 @@ class ASECalculator(Calculator):
 
         else:
             self.set_neighbours_and_offsets(atoms, box)
-            positions = np.array(space.transform(np.linalg.inv(box), atoms.positions))
+            positions = np.array(transform(np.linalg.inv(box), atoms.positions))
 
             results = self.step(positions, self.neighbors, box, self.offsets)
             if "hessian" in properties and "hessian" not in results:
@@ -664,7 +665,7 @@ def get_step_fn(
             if atoms_is_periodic:
                 box = box.T
                 inv_box = jnp.linalg.inv(box)
-                positions = space.transform(inv_box, positions)
+                positions = transform(inv_box, positions)
                 neighbor = neighbor.update(positions, box=box)
             else:
                 neighbor = neighbor.update(positions)

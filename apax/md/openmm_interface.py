@@ -23,7 +23,6 @@ except ImportError:
     _openmm_imported = False
 
 from ase.units import eV, kJ, mol, nm
-from jax_md import space
 from vesin import NeighborList
 
 from apax.md.ase_calc import (
@@ -34,6 +33,7 @@ from apax.md.ase_calc import (
     neighbor_calculable_with_jax,
 )
 from apax.train.checkpoints import restore_parameters
+from apax.utils.space import transform
 
 log = logging.getLogger(__name__)
 
@@ -247,7 +247,7 @@ class OpenMMInterface:
         if self.neigbor_from_jax:
             if np.any(box > 1e-6):
                 inv_box = jnp.linalg.inv(box.T)
-                positions = space.transform(inv_box, positions)  # frac coords
+                positions = transform(inv_box, positions)  # frac coords
                 self.neighbors = self.neighbor_fn.allocate(positions, box=box.T)
             else:
                 self.neighbors = self.neighbor_fn.allocate(positions)
@@ -350,12 +350,12 @@ class OpenMMInterface:
             if self.neighbors.did_buffer_overflow:
                 log.debug("Neighbor list overflowed, reallocating")
                 self.neighbors = self.neighbor_fn.allocate(
-                    space.transform(jnp.linalg.inv(box.T), pos)
+                    transform(jnp.linalg.inv(box.T), pos)
                 )
                 results, self.neighbors = self.step(pos, self.neighbors, box)
         else:
             self._set_neighbors_and_offsets(pos, box)
-            pos = np.array(space.transform(np.linalg.inv(box), pos))
+            pos = np.array(transform(np.linalg.inv(box), pos))
 
             results = self.step(pos, self.neighbors, box, self.offsets)
 

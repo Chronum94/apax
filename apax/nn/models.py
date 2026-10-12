@@ -7,7 +7,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from jax import Array
-from jax_md import partition
 
 from apax.layers.descriptor.gaussian_moment_descriptor import GaussianMomentDescriptor
 from apax.layers.distances import make_distance_fn
@@ -20,7 +19,7 @@ from apax.utils.math import fp64_sum
 from apax.utils.transform import make_energy_only_model
 
 DisplacementFn = Callable[[Array, Array], Array]
-MDModel = Tuple[partition.NeighborFn, Callable, Callable]
+MDModel = Tuple[Callable, Callable, Callable]
 
 log = logging.getLogger(__name__)
 
@@ -42,7 +41,7 @@ class FeatureModel(nn.Module):
         self,
         R: Array,
         Z: Array,
-        neighbor: Union[partition.NeighborList, Array],
+        neighbor: Union[Any, Array],
         box,
         offsets,
         perturbation=None,
@@ -88,7 +87,7 @@ class EnergyModel(nn.Module):
         self,
         R: Array,
         Z: Array,
-        neighbor: Union[partition.NeighborList, Array],
+        neighbor: Union[Any, Array],
         box,
         offsets,
         perturbation=None,
@@ -148,7 +147,7 @@ class EnergyDerivativeModel(nn.Module):
         self,
         R: Array,
         Z: Array,
-        neighbor: Union[partition.NeighborList, Array],
+        neighbor: Union[Any, Array],
         box,
         offsets,
     ):
@@ -181,7 +180,7 @@ def make_mean_energy_fn(energy_fn):
     def mean_energy_fn(
         R: Array,
         Z: Array,
-        neighbor: Union[partition.NeighborList, Array],
+        neighbor: Union[Any, Array],
         box,
         offsets,
         perturbation=None,
@@ -217,7 +216,7 @@ class ShallowEnsembleModel(nn.Module):
         self,
         R: Array,
         Z: Array,
-        neighbor: Union[partition.NeighborList, Array],
+        neighbor: Union[Any, Array],
         box,
         offsets,
     ):

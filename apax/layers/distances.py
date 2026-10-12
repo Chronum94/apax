@@ -1,19 +1,19 @@
 import jax.numpy as jnp
 import numpy as np
 from jax import vmap
-from jax_md import partition, space
+
+from apax.utils.space import raw_transform, transform
 
 
 def canonicalize_neighbors(neighbor):
-    return neighbor.idx if isinstance(neighbor, partition.NeighborList) else neighbor
+    return getattr(neighbor, "idx", neighbor)
 
 
 def disp_fn(ri, rj, perturbation, box):
-    dR = space.pairwise_displacement(ri, rj)
-    dR = space.transform(box, dR)
+    dR = transform(box, ri - rj)
 
     if perturbation is not None:
-        dR = dR + space.raw_transform(perturbation, dR)
+        dR = dR + raw_transform(perturbation, dR)
         # https://github.com/mir-group/nequip/blob/c56f48fcc9b4018a84e1ed28f762fadd5bc763f1/nequip/nn/_grad_output.py#L267
         # https://github.com/sirmarcel/glp/blob/main/glp/calculators/utils.py
         # other codes do R = R + strain, not dR
@@ -35,8 +35,9 @@ def make_distance_fn(init_box, inference_disp_fn=None):
 
     if np.all(init_box < 1e-6):
         # gas phase training and predicting
-        displacement_fn = space.free()[0]
-        displacement = space.map_bond(displacement_fn)
+        def displacement(Ra, Rb):
+            return Ra - Rb
+
     elif inference_disp_fn is None:
         # for training on periodic systems
         displacement = vmap(disp_fn, (0, 0, None, None), 0)
