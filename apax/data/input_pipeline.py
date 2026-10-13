@@ -234,8 +234,7 @@ class InMemoryDataset:
     def init_input(self) -> tuple[Dict[str, jnp.ndarray], np.ndarray]:
         """Returns first batch of inputs and labels to init the model."""
         positions = self.sample_atoms.positions * unit_dict[self.pos_unit]
-        box = self.sample_atoms.cell.array * unit_dict[self.pos_unit]
-        # For an input sample, it does not matter whether pos is fractional or cartesian
+        box = self.sample_atoms.cell.array.T * unit_dict[self.pos_unit]
         idx, offsets = compute_nl(positions, box, self.cutoff)
         inputs = (
             positions,

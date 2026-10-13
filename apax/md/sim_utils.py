@@ -43,3 +43,7 @@ class SimulationFunctions:
     auxiliary_fn: Callable
     shift_fn: Callable
     neighbor_fn: Callable
+    # Adaptive cutoff: selected-neighbor counts per atom, and the static capacity
+    # the energy/auxiliary functions were built with. None if not adaptive.
+    count_fn: Callable | None = None
+    k_sel: int | None = None

@@ -5,3 +5,4 @@ Usage Guides
    :maxdepth: 2
 
    property_prediction
+   adaptive_cutoff

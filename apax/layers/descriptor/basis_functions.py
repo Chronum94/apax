@@ -160,7 +160,7 @@ class RadialFunction(nn.Module):
         else:
             self._n_radial = self.basis_fn.n_basis
 
-    def __call__(self, dr, Z_i, Z_j):
+    def __call__(self, dr, Z_i, Z_j, cutoffs=None):
         dtype = str_to_dtype(self.dtype)
         dr = dr.astype(dtype)
         # transformed distance for featurization; cutoff still uses physical dr
@@ -184,8 +184,9 @@ class RadialFunction(nn.Module):
             )
 
         # shape: neighbors
-        cos_cutoff = cosine_cutoff(dr, self.r_max)
-        cutoff = einops.repeat(cos_cutoff, "neighbors -> neighbors 1")
+        if cutoffs is None:
+            cutoffs = cosine_cutoff(dr, self.r_max)
+        cutoff = einops.repeat(cutoffs.astype(dtype), "neighbors -> neighbors 1")
 
         radial_function = radial_function * cutoff
 
@@ -252,7 +253,7 @@ class FactorizedRadialFunction(nn.Module):
                 dtype,
             )
 
-    def __call__(self, dr, Z_i, Z_j):
+    def __call__(self, dr, Z_i, Z_j, cutoffs=None):
         dtype = str_to_dtype(self.dtype)
         dr = dr.astype(dtype)
         dr_feat = self.radial_transform(dr, Z_i, Z_j)
@@ -294,8 +295,9 @@ class FactorizedRadialFunction(nn.Module):
                 precision=jax.lax.Precision.HIGHEST,
             )
 
-        cos_cutoff = cosine_cutoff(dr, self.r_max)
-        radial_function = radial_function * cos_cutoff[:, None]
+        if cutoffs is None:
+            cutoffs = cosine_cutoff(dr, self.r_max)
+        radial_function = radial_function * cutoffs.astype(dtype)[:, None]
 
         assert radial_function.dtype == dtype
         return radial_function

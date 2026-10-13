@@ -20,7 +20,8 @@ class EquivMPRepresentation(nn.Module):
     apply_mask: bool = True
 
     @nn.compact
-    def __call__(self, dr_vec, Z, neighbor_idxs):
+    def __call__(self, dr_vec, Z, neighbor_idxs, cutoffs=None):
+        """``cutoffs`` (per-edge, e.g. adaptive) replaces the fixed smooth_cutoff."""
         dtype = str_to_dtype(self.dtype)
         dr_vec = dr_vec.astype(dtype)
 
@@ -35,11 +36,15 @@ class EquivMPRepresentation(nn.Module):
                 num=self.basis_fn.n_basis,
                 max_degree=self.max_degree,
                 radial_fn=lambda x, y: self.basis_fn(x),
-                cutoff_fn=functools.partial(
-                    e3x.nn.smooth_cutoff, cutoff=self.basis_fn.r_max
+                cutoff_fn=(
+                    functools.partial(e3x.nn.smooth_cutoff, cutoff=self.basis_fn.r_max)
+                    if cutoffs is None
+                    else None
                 ),
             )
         )
+        if cutoffs is not None:
+            basis = basis * cutoffs.astype(dtype)[:, None, None, None]
 
         if self.apply_mask:
             basis = mask_by_neighbor(basis, neighbor_idxs, dr_vec)

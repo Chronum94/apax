@@ -21,9 +21,13 @@ def get_node_mask(Z):
     return mask
 
 
-def get_neighbor_mask(idx):
-    mask = ((idx[0] - idx[1]) != 0).astype(jnp.int16)
-    return mask
+def get_neighbor_mask(idx, dr_vec=None):
+    """Padding is (i, i) with zero displacement; with ``dr_vec``, (i, i) pairs with
+    a nonzero displacement (periodic self-images) are kept."""
+    mask = idx[0] != idx[1]
+    if dr_vec is not None:
+        mask = mask | (jnp.sum(dr_vec**2, axis=-1) > 1e-12)
+    return mask.astype(jnp.int16)
 
 
 class So3kratesRepresentation(nn.Module):
@@ -46,7 +50,9 @@ class So3kratesRepresentation(nn.Module):
         dr_vec: Array,
         Z: Array,
         idx: Array,
+        cutoffs: Array | None = None,
     ):
+        """``cutoffs`` (per-edge, e.g. adaptive) replaces the fixed cutoff_fn."""
         dtype = str_to_dtype(self.dtype)
         dr_vec = dr_vec.astype(dtype)
 
@@ -54,7 +60,7 @@ class So3kratesRepresentation(nn.Module):
         i, j = idx[0], idx[1]
         Z_i = Z
 
-        pair_mask = get_neighbor_mask(idx)
+        pair_mask = get_neighbor_mask(idx, dr_vec)
         node_mask = get_node_mask(Z)
 
         scalar_features = ChemicalEmbedding(num_features=self.num_features)(
@@ -64,8 +70,11 @@ class So3kratesRepresentation(nn.Module):
 
         r_ij = e3x.ops.norm(R_ij, axis=-1)  # -> [pairs]
 
-        cutoff_fn = getattr(e3x.nn.functions, self.cutoff_fn)
-        cutoffs = cutoff_fn(r_ij, cutoff=self.basis_fn.r_max)  # -> [pairs]
+        if cutoffs is None:
+            cutoff_fn = getattr(e3x.nn.functions, self.cutoff_fn)
+            cutoffs = cutoff_fn(r_ij, cutoff=self.basis_fn.r_max)  # -> [pairs]
+        else:
+            cutoffs = cutoffs.astype(dtype)
         cutoffs *= pair_mask
 
         neighborhood_sizes = jax.ops.segment_sum(cutoffs, i, num_segments=Z_i.shape[0])[

@@ -206,6 +206,10 @@ class OpenMMInterface:
                 "This PythonForceClass instance was already initialized, and cannot be reinitialized with different atoms. Please create a new instance"
             )
         model_config, params = restore_parameters(self.model_dir)
+        if model_config.model.adaptive_cutoff is not None:
+            raise NotImplementedError(
+                "The OpenMM interface does not support adaptive_cutoff models yet."
+            )
         self.r_max = model_config.model.basis.r_max
 
         self._atoms_is_periodic = bool(np.any(atoms.cell.array > 1e-6))
@@ -354,8 +358,8 @@ class OpenMMInterface:
                 )
                 results, self.neighbors = self.step(pos, self.neighbors, box)
         else:
+            # vesin path: Cartesian positions, Cartesian periodic shifts
             self._set_neighbors_and_offsets(pos, box)
-            pos = np.array(space.transform(np.linalg.inv(box), pos))
 
             results = self.step(pos, self.neighbors, box, self.offsets)
 

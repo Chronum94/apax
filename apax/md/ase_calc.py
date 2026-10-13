@@ -16,12 +16,14 @@ from vesin import NeighborList
 
 from apax.config.train_config import Config
 from apax.data.input_pipeline import CachedInMemoryDataset, OTFInMemoryDataset
+from apax.layers.adaptive_cutoff import k_sel_for_inputs, make_count_fn
 from apax.md.function_transformations import ProcessStress
 from apax.train.checkpoints import (
     canonicalize_energy_model_parameters,
     check_for_ensemble,
     restore_parameters,
 )
+from apax.utils.convert import atoms_to_inputs
 
 
 def maybe_vmap(apply, params):
@@ -46,6 +48,8 @@ def build_energy_neighbor_fns(
     calc_stress: bool | None = None,
     calc_hessian: bool | None = None,
     force_variance: bool | None = None,
+    k_sel: int | None = None,
+    return_count_fn: bool = False,
 ):
     box = jnp.asarray(atoms.cell.array, dtype=jnp.float64)
     box = box.T
@@ -80,10 +84,32 @@ def build_energy_neighbor_fns(
         calc_stress=calc_stress,
         calc_hessian=calc_hessian,
         force_variance=force_variance,
+        k_sel=k_sel,
     )
 
     energy_fn = maybe_vmap(model.apply, params)
-    return energy_fn, neighbor_fn
+    if not return_count_fn:
+        return energy_fn, neighbor_fn
+
+    count_fn = None
+    if config.model.adaptive_cutoff is not None:
+        count_fn = make_count_fn(
+            config.model.model_dump(), np.array(box), inference_disp_fn=displacement_fn
+        )
+    return energy_fn, neighbor_fn, count_fn
+
+
+def add_adaptive_overflow_check(model, count_fn, k_sel):
+    """Adds ``adaptive_overflow`` to the results: True iff some atom selects more
+    neighbors than the model's static capacity ``k_sel``."""
+
+    def checked_model(positions, Z, idx, box, offsets):
+        results = model(positions, Z, idx, box, offsets)
+        counts = count_fn(positions, Z, idx, box, offsets)
+        results["adaptive_overflow"] = jnp.max(counts) > k_sel
+        return results
+
+    return checked_model
 
 
 def build_hessian_neighbor_fns(
@@ -94,6 +120,7 @@ def build_hessian_neighbor_fns(
     neigbor_from_jax: bool,
     calc_stress: bool | None = None,
     force_variance: bool | None = None,
+    k_sel: int | None = None,
 ):
     return build_energy_neighbor_fns(
         atoms,
@@ -104,6 +131,7 @@ def build_hessian_neighbor_fns(
         calc_stress=calc_stress,
         calc_hessian=True,
         force_variance=force_variance,
+        k_sel=k_sel,
     )
 
 
@@ -248,6 +276,7 @@ class ASECalculator(Calculator):
         self.neighbors = None
         self.offsets = None
         self.model = None
+        self.k_sel = None
 
     def _wrap_model(self, model):
         if self.n_models > 1:
@@ -321,7 +350,11 @@ class ASECalculator(Calculator):
         box = jnp.asarray(atoms.cell.array, dtype=jnp.float64)
         self.r_max = self.model_config.model.basis.r_max
         self.neigbor_from_jax = neighbor_calculable_with_jax(box, self.r_max)
-        model, neighbor_fn = build_energy_neighbor_fns(
+        # Sized for the current structure; resized when a later step overflows
+        self.k_sel = k_sel_for_inputs(
+            self.model_config.model.model_dump(), atoms_to_inputs([atoms.copy()])
+        )
+        model, neighbor_fn, count_fn = build_energy_neighbor_fns(
             atoms,
             self.model_config,
             self.params,
@@ -331,9 +364,13 @@ class ASECalculator(Calculator):
             calc_stress=self.calc_stress,
             calc_hessian=self.calc_hessian,
             force_variance=self.force_variance,
+            k_sel=self.k_sel,
+            return_count_fn=True,
         )
 
         model = self._wrap_model(model)
+        if count_fn is not None:
+            model = add_adaptive_overflow_check(model, count_fn, self.k_sel)
 
         self.model = model
         self.step = get_step_fn(
@@ -375,6 +412,7 @@ class ASECalculator(Calculator):
             self.neigbor_from_jax,
             calc_stress=self.calc_stress,
             force_variance=self.force_variance,
+            k_sel=self.k_sel,
         )
         hessian_model = self._wrap_model(hessian_model)
         self.hessian_step = get_step_fn(
@@ -427,13 +465,15 @@ class ASECalculator(Calculator):
         _, init_box = dataset.init_input()
 
         Builder = self.model_config.model.get_builder()
-        builder = Builder(self.model_config.model.model_dump(), n_species=119)
+        model_config = self.model_config.model.model_dump()
+        builder = Builder(model_config, n_species=119)
 
         feature_model = builder.build_feature_model(
             apply_mask=True,
             init_box=init_box,
             only_use_n_layers=only_use_n_layers,
             should_average=should_average,
+            k_sel=k_sel_for_inputs(model_config, dataset.inputs),
         )
 
         feature_fn = feature_model.apply
@@ -493,14 +533,17 @@ class ASECalculator(Calculator):
                 self.initialize(atoms)
 
         # predict
+        results = self._predict(atoms, positions, box)
+        if bool(results.pop("adaptive_overflow", False)):
+            print("adaptive cutoff exceeded neighbor capacity, resizing.")
+            self.initialize(atoms)
+            results = self._predict(atoms, positions, box)
+            if bool(results.pop("adaptive_overflow", False)):
+                raise RuntimeError(
+                    f"adaptive cutoff: cannot recover from overflow (k_sel={self.k_sel})"
+                )
+
         if self.neigbor_from_jax:
-            results, self.neighbors = self.step(positions, self.neighbors, box)
-
-            if self.neighbors.did_buffer_overflow:
-                print("neighbor list overflowed, reallocating.")
-                self.initialize(atoms)
-                results, self.neighbors = self.step(positions, self.neighbors, box)
-
             if "hessian" in properties and "hessian" not in results:
                 if self.hessian_step is None:
                     self._initialize_hessian(atoms)
@@ -508,10 +551,7 @@ class ASECalculator(Calculator):
                 results["hessian"] = hessian_results["hessian"]
 
         else:
-            self.set_neighbours_and_offsets(atoms, box)
-            positions = np.array(space.transform(np.linalg.inv(box), atoms.positions))
-
-            results = self.step(positions, self.neighbors, box, self.offsets)
+            positions = np.asarray(atoms.positions, dtype=np.float64)
             if "hessian" in properties and "hessian" not in results:
                 if self.hessian_step is None:
                     self._initialize_hessian(atoms)
@@ -527,6 +567,21 @@ class ASECalculator(Calculator):
             self.results["hessian"] = self.results["hessian"].reshape(
                 3 * n_atoms, 3 * n_atoms
             )
+
+    def _predict(self, atoms, positions, box):
+        if self.neigbor_from_jax:
+            results, self.neighbors = self.step(positions, self.neighbors, box)
+
+            if self.neighbors.did_buffer_overflow:
+                print("neighbor list overflowed, reallocating.")
+                self.initialize(atoms)
+                results, self.neighbors = self.step(positions, self.neighbors, box)
+        else:
+            # vesin path: Cartesian positions, Cartesian periodic shifts
+            self.set_neighbours_and_offsets(atoms, box)
+            positions = np.asarray(atoms.positions, dtype=np.float64)
+            results = self.step(positions, self.neighbors, box, self.offsets)
+        return results
 
     def get_hessian(self, atoms):
         return self.get_property("hessian", atoms)
@@ -571,10 +626,12 @@ class ASECalculator(Calculator):
         ds = dataset.batch()
 
         Builder = self.model_config.model.get_builder()
-        builder = Builder(self.model_config.model.model_dump())
+        model_config = self.model_config.model.model_dump()
+        builder = Builder(model_config)
         model = builder.build_energy_derivative_model(
             apply_mask=True,
             init_box=init_box,
+            k_sel=k_sel_for_inputs(model_config, dataset.inputs),
         ).apply
 
         if self.n_models > 1:

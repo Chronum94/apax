@@ -4,6 +4,7 @@ from pydantic import (
     BaseModel,
     Field,
     NonNegativeFloat,
+    NonNegativeInt,
     PositiveFloat,
     PositiveInt,
 )
@@ -176,6 +177,34 @@ class PropertyHead(BaseModel, extra="forbid"):
     dtype: Literal["fp32", "fp64"] = "fp32"
 
 
+class AdaptiveCutoffConfig(BaseModel, extra="forbid"):
+    """
+    Adaptive per-atom cutoffs (PET-style, "solver" method). Each atom gets a
+    cutoff such that it has approximately `num_neighbors` neighbors; pairs are
+    kept within the mean of both atomic cutoffs. `basis.r_max` becomes the
+    maximum cutoff (and the neighborlist cutoff). Gradients flow through the
+    per-atom cutoffs, so forces and stress remain conservative.
+
+    Parameters
+    ----------
+    num_neighbors : PositiveInt
+        Target number of neighbors per atom.
+    cutoff_width_adaptive : PositiveFloat, default = 0.5
+        Width of the smooth neighbor counting used to find the per-atom cutoffs.
+    cutoff_width : PositiveFloat, default = 0.5
+        Width of the smooth taper applied to edges at their pair cutoff.
+        Replaces the descriptor's fixed cutoff function at `r_max`.
+    extra_neighbors : NonNegativeInt, default = 4
+        Margin added to the largest selected neighbor count when sizing the
+        (static) per-atom edge capacity. Larger values recompile less often in MD.
+    """
+
+    num_neighbors: PositiveInt
+    cutoff_width_adaptive: PositiveFloat = 0.5
+    cutoff_width: PositiveFloat = 0.5
+    extra_neighbors: NonNegativeInt = 4
+
+
 class BaseModelConfig(BaseModel, extra="forbid"):
     """
     Configuration for the model.
@@ -219,6 +248,8 @@ class BaseModelConfig(BaseModel, extra="forbid"):
         Data type for readout calculations.
     scale_shift_dtype : Literal["fp32", "fp64"], default = "fp64"
         Data type for scale and shift parameters.
+    adaptive_cutoff : Optional[AdaptiveCutoffConfig], default = None
+        Adaptive per-atom cutoffs (optional).
     """
 
     basis: BasisConfig = Field(BesselBasisConfig(name="bessel"), discriminator="name")
@@ -245,6 +276,8 @@ class BaseModelConfig(BaseModel, extra="forbid"):
     descriptor_dtype: Literal["fp32", "fp64"] = "fp32"
     readout_dtype: Literal["fp32", "fp64"] = "fp32"
     scale_shift_dtype: Literal["fp32", "fp64"] = "fp64"
+
+    adaptive_cutoff: Optional[AdaptiveCutoffConfig] = None
 
 
 class GMNNConfig(BaseModelConfig, extra="forbid"):

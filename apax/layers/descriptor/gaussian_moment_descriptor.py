@@ -43,7 +43,8 @@ class GaussianMomentDescriptor(nn.Module):
         self.triang_idxs_2d = tril_2d_indices(n_tensor)
         self.triang_idxs_3d = tril_3d_indices(n_tensor)
 
-    def __call__(self, dr_vec, Z, neighbor_idxs):
+    def __call__(self, dr_vec, Z, neighbor_idxs, cutoffs=None):
+        """``cutoffs`` (per-edge, e.g. adaptive) replaces the fixed cosine cutoff."""
         dtype = str_to_dtype(self.dtype)
         dr_vec = dr_vec.astype(dtype)
         # Z shape n_atoms
@@ -62,7 +63,7 @@ class GaussianMomentDescriptor(nn.Module):
         # normalized distance vectors, shape neighbors x 3
         dn = dr_vec / dr_repeated
 
-        radial_function = self.radial_fn(dr, Z_i, Z_j)
+        radial_function = self.radial_fn(dr, Z_i, Z_j, cutoffs=cutoffs)
         if self.apply_mask:
             radial_function = mask_by_neighbor(radial_function, neighbor_idxs, dr_vec)
 

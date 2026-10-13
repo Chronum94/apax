@@ -7,8 +7,9 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from jax import Array
-from jax_md import partition
+from jax_md import partition, space
 
+from apax.layers.adaptive_cutoff import AdaptiveCutoff
 from apax.layers.descriptor.gaussian_moment_descriptor import GaussianMomentDescriptor
 from apax.layers.distances import make_distance_fn
 from apax.layers.empirical import EmpiricalEnergyTerm
@@ -25,6 +26,17 @@ MDModel = Tuple[partition.NeighborFn, Callable, Callable]
 log = logging.getLogger(__name__)
 
 
+def apply_representation(representation, adaptive, dr_vec, Z, idx):
+    """Representation on the raw edges, or on the adaptively selected and packed
+    ones. Returns ``(features, dr_vec, idx)`` with the edges actually used."""
+    if adaptive is None:
+        return representation(dr_vec, Z, idx), dr_vec, idx
+    dr_vec, idx, cutoffs, _ = adaptive(dr_vec, idx, Z.shape[0])
+    # packed idx is traced; Z may be a closed-over numpy array
+    Z = jnp.asarray(Z)
+    return representation(dr_vec, Z, idx, cutoffs=cutoffs), dr_vec, idx
+
+
 class FeatureModel(nn.Module):
     """Model wraps some submodel (e.g. a descriptor) to supply distance computation."""
 
@@ -34,6 +46,7 @@ class FeatureModel(nn.Module):
     init_box: np.array = field(default_factory=lambda: np.array([0.0, 0.0, 0.0]))
     inference_disp_fn: Any = None
     mask_atoms: bool = True
+    adaptive: Optional[AdaptiveCutoff] = None
 
     def setup(self):
         self.compute_distances = make_distance_fn(self.init_box, self.inference_disp_fn)
@@ -55,7 +68,9 @@ class FeatureModel(nn.Module):
             perturbation,
         )
 
-        features = self.representation(dr_vec, Z, idx)
+        features, *_ = apply_representation(
+            self.representation, self.adaptive, dr_vec, Z, idx
+        )
 
         if self.readout:
             features = jax.vmap(self.readout)(features)
@@ -80,6 +95,7 @@ class EnergyModel(nn.Module):
     init_box: np.array = field(default_factory=lambda: np.array([0.0, 0.0, 0.0]))
     mask_atoms: bool = True
     inference_disp_fn: Any = None
+    adaptive: Optional[AdaptiveCutoff] = None
 
     def setup(self):
         self.compute_distances = make_distance_fn(self.init_box, self.inference_disp_fn)
@@ -101,10 +117,20 @@ class EnergyModel(nn.Module):
             perturbation,
         )
 
+        # Heads and corrections that use absolute positions expect Cartesian ones;
+        # jax-md inference on periodic systems works in fractional coordinates.
+        R_cart = R
+        if self.inference_disp_fn is not None and not np.all(self.init_box < 1e-6):
+            R_cart = space.transform(box, R)
+
+        # Empirical corrections act on the raw neighbors, independent of selection
+        dr_vec_raw, idx_raw = dr_vec, idx
         # Model Core
         # shape Natoms
         # shape shallow ens: Natoms x Nensemble
-        g = self.representation(dr_vec, Z, idx)
+        g, dr_vec, idx = apply_representation(
+            self.representation, self.adaptive, dr_vec, Z, idx
+        )
         h = jax.vmap(self.readout)(g)
         E_i = self.scale_shift(h, Z)
 
@@ -123,12 +149,14 @@ class EnergyModel(nn.Module):
 
         properties = {}
         for property_head in self.property_heads:
-            result = property_head(g, R, dr_vec, Z, idx, box)
+            result = property_head(g, R_cart, dr_vec, Z, idx, box)
             properties.update(result)
 
         # Corrections
         for correction in self.corrections:
-            energy_correction = correction(R, dr_vec, Z, idx, box, properties)
+            energy_correction = correction(
+                R_cart, dr_vec_raw, Z, idx_raw, box, properties
+            )
             energy = energy + energy_correction
 
         return energy, properties
