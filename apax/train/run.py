@@ -9,6 +9,7 @@ from apax.config import Config, LossConfig, parse_config
 from apax.data.initialization import load_data_files
 from apax.data.input_pipeline import dataset_dict
 from apax.data.statistics import compute_scale_shift_parameters
+from apax.layers.adaptive_cutoff import k_sel_for_inputs
 from apax.optimizer import get_opt
 from apax.train.callbacks import initialize_callbacks
 from apax.train.checkpoints import create_params, create_train_state
@@ -199,12 +200,16 @@ def run(user_config: Union[str, os.PathLike, dict], log_level="error"):
 
     sample_input, init_box = train_ds.init_input()
     Builder = config.model.get_builder()
-    builder = Builder(config.model.model_dump())
+    model_config = config.model.model_dump()
+    builder = Builder(model_config)
+    # Training geometries are fixed, so a k_sel covering all of them never overflows
+    k_sel = k_sel_for_inputs(model_config, train_ds.inputs, val_ds.inputs)
     model = builder.build_energy_derivative_model(
         scale=ds_stats.elemental_scale,
         shift=ds_stats.elemental_shift,
         apply_mask=True,
         init_box=init_box,
+        k_sel=k_sel,
     )
     batched_model = jax.vmap(model.apply, in_axes=(None, 0, 0, 0, 0, 0))
 

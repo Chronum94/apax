@@ -9,6 +9,7 @@ from tqdm import trange
 
 from apax.config import parse_config
 from apax.data.input_pipeline import OTFInMemoryDataset
+from apax.layers.adaptive_cutoff import k_sel_for_inputs
 from apax.train.callbacks import initialize_callbacks
 from apax.train.checkpoints import restore_single_parameters
 from apax.train.metrics import initialize_metrics
@@ -186,10 +187,12 @@ def eval_model(config_path, n_test=-1, log_file="eval.log", log_level="error"):
         n_full_models = 1
 
     Builder = config.model.get_builder()
-    builder = Builder(config.model.model_dump(), n_species=119)
+    model_config = config.model.model_dump()
+    builder = Builder(model_config, n_species=119)
     model = builder.build_energy_derivative_model(
         apply_mask=True,
         init_box=init_box,
+        k_sel=k_sel_for_inputs(model_config, test_ds.inputs),
     )
 
     model = jax.vmap(model.apply, in_axes=(None, 0, 0, 0, 0, 0))

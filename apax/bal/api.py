@@ -10,6 +10,7 @@ from tqdm import trange
 
 from apax.bal import feature_maps, kernel, selection, transforms
 from apax.data.input_pipeline import OTFInMemoryDataset
+from apax.layers.adaptive_cutoff import k_sel_for_inputs
 from apax.nn.models import EnergyModel
 from apax.train.checkpoints import (
     canonicalize_energy_model_parameters,
@@ -151,9 +152,13 @@ def kernel_selection(
     _, init_box = dataset.init_input()
 
     Builder = config.model.get_builder()
-    builder = Builder(config.model.model_dump(), n_species=119)
+    model_config = config.model.model_dump()
+    builder = Builder(model_config, n_species=119)
 
-    energy_model = builder.build_energy_model(apply_mask=True, init_box=init_box)
+    k_sel = k_sel_for_inputs(model_config, dataset.inputs)
+    energy_model = builder.build_energy_model(
+        apply_mask=True, init_box=init_box, k_sel=k_sel
+    )
     energy_model = make_energy_only_model(energy_model.apply)
 
     feature_fn = create_feature_fn(

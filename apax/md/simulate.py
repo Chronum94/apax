@@ -2,6 +2,7 @@ import logging
 import time
 from functools import partial
 from pathlib import Path
+from typing import Callable
 
 import jax
 import jax.numpy as jnp
@@ -16,6 +17,7 @@ from tqdm.contrib.logging import logging_redirect_tqdm
 
 from apax.config import Config, MDConfig, parse_config
 from apax.config.md_config import Integrator
+from apax.layers.adaptive_cutoff import k_sel_for_inputs, make_count_fn, size_k_sel
 from apax.md.ase_calc import make_ensemble, maybe_vmap
 from apax.md.bias import (
     BiasEnergies,
@@ -32,6 +34,7 @@ from apax.train.checkpoints import (
     restore_parameters,
 )
 from apax.train.run import setup_logging
+from apax.utils.convert import atoms_to_inputs
 
 log = logging.getLogger(__name__)
 
@@ -223,11 +226,11 @@ def check_for_nans(state, step):
         raise ValueError(f"NaN encountered, simulation aborted after {step + 1} steps.")
 
 
-def handle_overflow(neighbor_fn, state, traj_handler, step):
+def handle_overflow(neighbor_fn, state, traj_handler, step, extra_capacity=0):
     with logging_redirect_tqdm():
         log.warning("step %d: neighbor list overflowed, reallocating.", step)
-    traj_handler.reset_buffer()
-    return neighbor_fn.allocate(state.position)
+    traj_handler.discard_uncommitted()
+    return neighbor_fn.allocate(state.position, extra_capacity=extra_capacity)
 
 
 def maybe_save_checkpoint(mngr, state, step, checkpoint_interval, sim_time_per_step):
@@ -266,6 +269,7 @@ def run_sim(
     dynamics_checks: list[DynamicsCheckBase] = [],
     constraints: list[ConstraintBase] = [],
     disable_pbar: bool = False,
+    resize_sim_fns: Callable[[int], SimulationFunctions] | None = None,
 ):
     """
     Performs NVT MD.
@@ -289,6 +293,10 @@ def run_sim(
         full simulation state checkpoints.
     sim_dir : Path
         Directory where the trajectory and simulation checkpoints will be saved.
+    resize_sim_fns : Callable[[int], SimulationFunctions] | None
+        For adaptive cutoff models: rebuilds the simulation functions with an
+        edge capacity covering the given maximum selected neighbor count, when a
+        chunk exceeds the current capacity.
     """
     neighbor_fn = sim_fns.neighbor_fn
     ckpt_dir = sim_dir / "ckpts"
@@ -299,8 +307,11 @@ def run_sim(
         system,
     )
 
+    if sim_fns.k_sel is not None and resize_sim_fns is None:
+        raise ValueError("adaptive cutoff models require resize_sim_fns")
+
     log.info("initializing simulation")
-    init_fn, apply_fn, kT, nbr_options = get_ensemble(ensemble, sim_fns, constrained_idxs)
+    init_fn, _, _, _ = get_ensemble(ensemble, sim_fns, constrained_idxs)
 
     neighbor = sim_fns.neighbor_fn.allocate(
         system.positions, extra_capacity=extra_capacity
@@ -335,53 +346,76 @@ def run_sim(
     pbar_update_freq = int(np.ceil(500 / n_inner))
     pbar_increment = n_inner * pbar_update_freq
 
-    on_eval, no_eval = create_evaluation_functions(
-        traj_handler,
-        sim_fns.auxiliary_fn,
-        system.atomic_numbers,
-        neighbor,
-        dynamics_checks,
-    )
+    def build_sim(sim_fns):
+        _, apply_fn, kT, nbr_options = get_ensemble(ensemble, sim_fns, constrained_idxs)
+        on_eval, no_eval = create_evaluation_functions(
+            traj_handler,
+            sim_fns.auxiliary_fn,
+            system.atomic_numbers,
+            neighbor,
+            dynamics_checks,
+        )
+        count_fn = sim_fns.count_fn
+        offsets = jnp.zeros(3)
 
-    @jax.jit
-    def sim(state, outer_step, neighbor):  # TODO make more modular
-        def body_fn(i, state):
-            state, outer_step, neighbor, all_checks_passed = state
-            step = i + outer_step * n_inner
+        @jax.jit
+        def sim(state, outer_step, neighbor):  # TODO make more modular
+            def body_fn(i, state):
+                state, outer_step, neighbor, all_checks_passed, max_count = state
+                step = i + outer_step * n_inner
 
-            apply_fn_kwargs = {}
-            if isinstance(state, simulate.NPTNoseHooverState):
-                box = state.box
-            else:
-                box = system.box
-                apply_fn_kwargs = {"box": box}
+                apply_fn_kwargs = {}
+                if isinstance(state, simulate.NPTNoseHooverState):
+                    box = state.box
+                else:
+                    box = system.box
+                    apply_fn_kwargs = {"box": box}
 
-            apply_fn_kwargs["kT"] = kT(step)  # Get current Temperature
+                apply_fn_kwargs["kT"] = kT(step)  # Get current Temperature
 
-            state = apply_fn(state, neighbor=neighbor, **apply_fn_kwargs)
+                state = apply_fn(state, neighbor=neighbor, **apply_fn_kwargs)
 
-            state = apply_constraints(state)
+                state = apply_constraints(state)
 
-            nbr_kwargs = nbr_options(state)
-            neighbor = neighbor.update(state.position, **nbr_kwargs)
+                nbr_kwargs = nbr_options(state)
+                neighbor = neighbor.update(state.position, **nbr_kwargs)
 
-            condition = step % sampling_rate == 0
-            checks_passed = jax.lax.cond(
-                condition, on_eval, no_eval, state, neighbor, box, nbr_kwargs
+                if count_fn is not None:
+                    # selected neighbors at the positions of the next force call
+                    counts = count_fn(
+                        state.position,
+                        system.atomic_numbers,
+                        neighbor,
+                        nbr_kwargs.get("box", box),
+                        offsets,
+                    )
+                    max_count = jnp.maximum(max_count, jnp.max(counts))
+
+                condition = step % sampling_rate == 0
+                checks_passed = jax.lax.cond(
+                    condition, on_eval, no_eval, state, neighbor, box, nbr_kwargs
+                )
+
+                all_checks_passed = all_checks_passed & checks_passed
+                return state, outer_step, neighbor, all_checks_passed, max_count
+
+            all_checks_passed = True
+            max_count = jnp.array(0, dtype=jnp.int32)
+            state, outer_step, neighbor, all_checks_passed, max_count = jax.lax.fori_loop(
+                0,
+                n_inner,
+                body_fn,
+                (state, outer_step, neighbor, all_checks_passed, max_count),
+            )
+            current_temperature = (
+                quantity.temperature(velocity=state.velocity, mass=state.mass) / units.kB
             )
 
-            all_checks_passed = all_checks_passed & checks_passed
-            return state, outer_step, neighbor, all_checks_passed
+            return state, neighbor, current_temperature, all_checks_passed, max_count
 
-        all_checks_passed = True
-        state, outer_step, neighbor, all_checks_passed = jax.lax.fori_loop(
-            0, n_inner, body_fn, (state, outer_step, neighbor, all_checks_passed)
-        )
-        current_temperature = (
-            quantity.temperature(velocity=state.velocity, mass=state.mass) / units.kB
-        )
+        return sim
 
-        return state, neighbor, current_temperature, all_checks_passed
+    sim = build_sim(sim_fns)
 
     start = time.time()
     total_sim_time = n_steps * ensemble.dt / 1000
@@ -400,9 +434,27 @@ def run_sim(
     sim_time_per_step = n_inner * ensemble.dt / 1000
     with mngr:
         while step < n_outer:
-            new_state, neighbor, current_temperature, all_checks_passed = sim(
+            old_neighbor = neighbor
+            new_state, neighbor, current_temperature, all_checks_passed, max_count = sim(
                 state, step, neighbor
             )
+
+            if sim_fns.k_sel is not None and int(max_count) > sim_fns.k_sel:
+                # Forces after the overflow dropped edges: redo the chunk with a
+                # larger capacity. The redo may reach further, so repeat as needed.
+                with logging_redirect_tqdm():
+                    log.warning(
+                        "step %d: adaptive cutoff selected %d > k_sel=%d neighbors,"
+                        " rebuilding.",
+                        step,
+                        int(max_count),
+                        sim_fns.k_sel,
+                    )
+                traj_handler.discard_uncommitted()
+                sim_fns = resize_sim_fns(int(max_count))
+                sim = build_sim(sim_fns)
+                neighbor = old_neighbor
+                continue
 
             check_for_nans(state, step)
 
@@ -414,10 +466,13 @@ def run_sim(
                 break
 
             if neighbor.did_buffer_overflow:
-                neighbor = handle_overflow(neighbor_fn, state, traj_handler, step)
+                neighbor = handle_overflow(
+                    neighbor_fn, state, traj_handler, step, extra_capacity
+                )
                 continue
 
             state = new_state
+            traj_handler.commit()
             step += 1
             maybe_save_checkpoint(
                 mngr, state, step, checkpoint_interval, sim_time_per_step
@@ -454,7 +509,7 @@ def run_sim(
     )
 
 
-def md_setup(model_config: Config, md_config: MDConfig):
+def md_setup(model_config: Config, md_config: MDConfig, k_sel: int | None = None):
     """
     Sets up the energy and neighborlist functions for an MD simulation,
     loads the initial structure.
@@ -465,6 +520,9 @@ def md_setup(model_config: Config, md_config: MDConfig):
         Configuration of the model used as an interatomic potential.
     md_config : MDConfig
         configuration of the MD simulation.
+    k_sel : int | None
+        Per-atom edge capacity for adaptive cutoff models. Sized from the
+        initial structure if not given.
 
     Returns
     -------
@@ -514,11 +572,20 @@ def md_setup(model_config: Config, md_config: MDConfig):
         )
 
     Builder = model_config.model.get_builder()
-    builder = Builder(model_config.model.model_dump())
+    model_dict = model_config.model.model_dump()
+    builder = Builder(model_dict)
+
+    count_fn = None
+    if model_config.model.adaptive_cutoff is not None:
+        if k_sel is None:
+            k_sel = k_sel_for_inputs(model_dict, atoms_to_inputs([atoms.copy()]))
+        count_fn = make_count_fn(model_dict, np.array(system.box), displacement_fn)
+
     energy_model = builder.build_energy_model(
         apply_mask=True,
         init_box=np.array(system.box),
         inference_disp_fn=displacement_fn,
+        k_sel=k_sel,
     )
     disable_cell_list = md_config.disable_cell_list or np.all(system.box < 1e-6)
     neighbor_fn = partition.neighbor_list(
@@ -571,6 +638,7 @@ def md_setup(model_config: Config, md_config: MDConfig):
         calc_stress="stress" in md_config.properties,
         calc_hessian="hessian" in md_config.properties,
         force_variance=force_variance,
+        k_sel=k_sel,
     ).apply
 
     if n_models > 1 and not shallow:
@@ -586,7 +654,9 @@ def md_setup(model_config: Config, md_config: MDConfig):
         energy_fn = apply_bias_energy(bias, energy_fn)
         auxiliary_fn = apply_bias_auxiliary(bias, auxiliary_fn)
 
-    sim_fns = SimulationFunctions(energy_fn, auxiliary_fn, shift_fn, neighbor_fn)
+    sim_fns = SimulationFunctions(
+        energy_fn, auxiliary_fn, shift_fn, neighbor_fn, count_fn=count_fn, k_sel=k_sel
+    )
     return system, sim_fns
 
 
@@ -613,6 +683,14 @@ def run_md(model_config: Config, md_config: MDConfig, log_level="error"):
     traj_path = sim_dir / md_config.traj_name
 
     system, sim_fns = md_setup(model_config, md_config)
+
+    resize_sim_fns = None
+    if model_config.model.adaptive_cutoff is not None:
+        extra_neighbors = model_config.model.adaptive_cutoff.extra_neighbors
+
+        def resize_sim_fns(max_count):
+            k_sel = size_k_sel(max_count, extra_neighbors)
+            return md_setup(model_config, md_config, k_sel=k_sel)[1]
 
     dynamics_checks = []
     if md_config.dynamics_checks:
@@ -655,4 +733,5 @@ def run_md(model_config: Config, md_config: MDConfig, log_level="error"):
         dynamics_checks=dynamics_checks,
         constraints=constraints,
         disable_pbar=md_config.disable_pbar,
+        resize_sim_fns=resize_sim_fns,
     )

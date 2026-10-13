@@ -77,11 +77,11 @@ def _model_config():
 
 
 def _offset_inputs(atoms):
-    """Inputs as the training pipeline builds them (box = cell.T, fractional positions)."""
+    """Inputs as the training pipeline builds them (box = cell.T, Cartesian positions)."""
     box = np.asarray(atoms.cell.array).T
-    frac = atoms.get_scaled_positions()
-    idx, offsets = compute_nl(frac, box, R_MAX)
-    return frac, atoms.numbers, idx, box, offsets
+    positions = np.asarray(atoms.positions)
+    idx, offsets = compute_nl(positions, box, R_MAX)
+    return positions, atoms.numbers, idx, box, offsets
 
 
 def _params(cfg, atoms):
@@ -203,7 +203,7 @@ def test_jax_md_neighbor_list_finds_all_pairs(make, rep):
         keep = i < len(atoms)
         dr = jax.vmap(disp)(frac[j[keep]], frac[i[keep]])
         n_jax = int((jnp.linalg.norm(dr, axis=1) < R_MAX).sum())
-    idx, _ = compute_nl(atoms.get_scaled_positions(), atoms.cell.array.T, R_MAX)
+    idx, _ = compute_nl(atoms.positions, atoms.cell.array.T, R_MAX)
     assert n_jax == idx.shape[1]
 
 

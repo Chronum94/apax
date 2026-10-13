@@ -35,6 +35,7 @@ def load_nlh_coeffs(path, n_species: int | None = None):
 
 from apax.config import ModelConfig
 from apax.layers.activation import get_activation_fn
+from apax.layers.adaptive_cutoff import build_adaptive_cutoff
 from apax.layers.descriptor import (
     EquivMPRepresentation,
     GaussianMomentDescriptor,
@@ -235,6 +236,7 @@ class ModelBuilder:
         apply_mask=True,
         init_box: np.array = np.array([0.0, 0.0, 0.0]),
         inference_disp_fn=None,
+        k_sel: int | None = None,
     ):
         log.debug("Building atomistic model")
 
@@ -253,6 +255,7 @@ class ModelBuilder:
             corrections=corrections,
             init_box=init_box,
             inference_disp_fn=inference_disp_fn,
+            adaptive=build_adaptive_cutoff(self.config, k_sel),
         )
         return model
 
@@ -266,6 +269,7 @@ class ModelBuilder:
         calc_stress: bool | None = None,
         calc_hessian: bool | None = None,
         force_variance: bool | None = None,
+        k_sel: int | None = None,
     ):
         energy_model = self.build_energy_model(
             scale,
@@ -273,12 +277,19 @@ class ModelBuilder:
             apply_mask,
             init_box=init_box,
             inference_disp_fn=inference_disp_fn,
+            k_sel=k_sel,
         )
 
         if calc_stress is None:
             calc_stress = self.config["calc_stress"]
         if calc_hessian is None:
             calc_hessian = self.config["calc_hessian"]
+
+        if calc_hessian and self.config.get("adaptive_cutoff"):
+            log.warning(
+                "Hessians with adaptive_cutoff neglect the curvature of the per-atom"
+                " cutoffs (exact first derivatives only)."
+            )
 
         if (
             self.config["ensemble"]
@@ -312,6 +323,7 @@ class ModelBuilder:
         init_box: np.array = np.array([0.0, 0.0, 0.0]),
         inference_disp_fn=None,
         should_average: bool = True,
+        k_sel: int | None = None,
     ):
         log.info("Building feature model")
         descriptor = self.build_descriptor(apply_mask)
@@ -326,6 +338,7 @@ class ModelBuilder:
             init_box=init_box,
             inference_disp_fn=inference_disp_fn,
             mask_atoms=True,
+            adaptive=build_adaptive_cutoff(self.config, k_sel),
         )
         return model
 

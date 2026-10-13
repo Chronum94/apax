@@ -1,14 +1,11 @@
-from collections import Counter
-
 import numpy as np
 import pytest
 from ase import Atoms
 from ase.calculators.singlepoint import SinglePointCalculator
-from jax import vmap
 from vesin import NeighborList
 
 from apax.data.preprocessing import compute_nl
-from apax.layers.distances import disp_fn
+from apax.layers.distances import make_distance_fn
 from apax.utils.convert import atoms_to_inputs, atoms_to_labels
 from apax.utils.data import split_atoms, split_idxs
 from apax.utils.random import seed_py_np_tf
@@ -194,19 +191,15 @@ def test_neighbors_and_displacements(pbc, calc_results, cell):
     positions = np.asarray(inputs["positions"][0])
     idx, offsets = compute_nl(positions, box, r_max)
 
-    Ri = positions[idx[0]]
-    Rj = positions[idx[1]]
-    displacement = vmap(disp_fn, (0, 0, None, None), 0)
-    apax_dr_vec = displacement(Rj, Ri, None, box)
-    apax_dr_vec += offsets
-    apax_dr_vec = np.asarray(apax_dr_vec)
-    apax_dist = np.linalg.norm(apax_dr_vec, axis=1)
+    compute_distances = make_distance_fn(box)
+    apax_dr_vec, _ = compute_distances(positions, idx, box, offsets)
+    apax_dist = np.linalg.norm(np.asarray(apax_dr_vec), axis=1)
 
     calculator = NeighborList(cutoff=r_max, full_list=True)
     vesin_dists = calculator.compute(
         points=atoms.positions, box=box.T, periodic=True, quantities="d"
     )[0]
 
-    assert Counter(vesin_dists) == Counter(apax_dist)
+    np.testing.assert_allclose(np.sort(apax_dist), np.sort(vesin_dists), atol=1e-12)
     assert np.all(vesin_dists < r_max)
     assert np.all(apax_dist < r_max)

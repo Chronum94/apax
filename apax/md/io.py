@@ -44,6 +44,14 @@ class TrajHandler:
     def reset_buffer(self):
         pass
 
+    def commit(self):
+        """Mark buffered frames as accepted (the chunk that produced them is kept)."""
+        pass
+
+    def discard_uncommitted(self):
+        """Drop frames from a chunk that is about to be redone."""
+        pass
+
     def register_properties(self, new_props: list[str]):
         for prop in new_props:
             if prop not in all_properties:
@@ -106,17 +114,26 @@ class H5TrajHandler(TrajHandler):
 
         self.buffer = []
         self.buffer_size = buffer_size
+        self.n_committed = 0
 
     def reset_buffer(self):
         self.buffer = []
+        self.n_committed = 0
 
     def step(self, state, transform=None):
+        # Frames are only flushed once their chunk is committed, since a chunk
+        # can still be discarded and redone (neighbor/adaptive cutoff overflow).
         state, predictions, nbr_kwargs = state
         new_atoms = self.atoms_from_state(state, predictions, nbr_kwargs)
         self.buffer.append(new_atoms)
 
-        if len(self.buffer) >= self.buffer_size:
+    def commit(self):
+        self.n_committed = len(self.buffer)
+        if self.n_committed >= self.buffer_size:
             self.write()
+
+    def discard_uncommitted(self):
+        self.buffer = self.buffer[: self.n_committed]
 
     def write(self, x=None, transform=None):
         if len(self.buffer) > 0:

@@ -8,14 +8,6 @@ def canonicalize_neighbors(neighbor):
     return neighbor.idx if isinstance(neighbor, partition.NeighborList) else neighbor
 
 
-def disp_fn(ri, rj, perturbation, box):
-    # `perturbation` is accepted for signature compatibility but applied in
-    # `compute_distances`, after the periodic-image offsets are added.
-    dR = space.pairwise_displacement(ri, rj)
-    dR = space.transform(box, dR)
-    return dR
-
-
 def get_disp_fn(displacement):
     def disp_fn(ri, rj, perturbation, box):
         return displacement(ri, rj, perturbation, box=box)
@@ -24,43 +16,55 @@ def get_disp_fn(displacement):
 
 
 def make_distance_fn(init_box, inference_disp_fn=None):
-    """Model which post processes the output of an atomistic model and
-    adds empirical energy terms.
+    """Edge vectors ``r_ij = R_j - R_i (+ periodic shift)`` for a neighbor list.
+
+    Without ``inference_disp_fn`` (training, batch evaluation, vesin-based
+    inference), positions are Cartesian and ``offsets`` are the Cartesian image
+    shifts ``S @ cell`` (zero for gas phase), so periodic and gas-phase structures
+    share one code path and can be mixed in a dataset.
+
+    With an ``inference_disp_fn`` (jax-md neighbor lists), the jax-md displacement
+    function is used, with fractional positions for periodic systems.
+
+    ``perturbation`` is the deformation gradient ``F = 1 + eps`` used for stress:
+    every edge vector, including its periodic shift, is mapped to ``F r_ij``
+    (jax_md convention).
     """
 
+    if inference_disp_fn is None:
+
+        def compute_distances(R, neighbor, box, offsets, perturbation=None):
+            idx = canonicalize_neighbors(neighbor)
+            R = R.astype(jnp.float64)
+            dr_vec = R[idx[1]] - R[idx[0]]
+            # Gas-phase callers may pass a zero placeholder that is not per-edge.
+            if jnp.ndim(offsets) == 2 and offsets.shape[0] == dr_vec.shape[0]:
+                dr_vec = dr_vec + offsets
+            if perturbation is not None:
+                dr_vec = space.raw_transform(perturbation, dr_vec)
+            return dr_vec, idx
+
+        return compute_distances
+
     if np.all(init_box < 1e-6):
-        # gas phase training and predicting
-        displacement_fn = space.free()[0]
-        displacement = space.map_bond(displacement_fn)
-    elif inference_disp_fn is None:
-        # for training on periodic systems
-        displacement = vmap(disp_fn, (0, 0, None, None), 0)
+        displacement = space.map_bond(space.free()[0])
     else:
-        mappable_displacement_fn = get_disp_fn(inference_disp_fn)
-        displacement = vmap(mappable_displacement_fn, (0, 0, None, None), 0)
+        displacement = vmap(get_disp_fn(inference_disp_fn), (0, 0, None, None), 0)
 
     def compute_distances(R, neighbor, box, offsets, perturbation=None):
-        # Distances
         idx = canonicalize_neighbors(neighbor)
-        idx_i, idx_j = idx[0], idx[1]
-
-        # R shape n_atoms x 3
         R = R.astype(jnp.float64)
-        Ri = R[idx_i]
-        Rj = R[idx_j]
+        Ri = R[idx[0]]
+        Rj = R[idx[1]]
 
-        # dr_vec shape: neighbors x 3
         if np.all(init_box < 1e-6):
-            # reverse conventnion to match TF
-            # distance vector for gas phase training and predicting
             dr_vec = displacement(Rj, Ri)
         else:
-            # distance vector for training on periodic systems
             dr_vec = displacement(Rj, Ri, None, box)
             dr_vec += offsets
             if perturbation is not None:
-                # homogeneous deformation F = I + strain of the full pair vector,
-                # periodic-image shift included (jax_md convention: F replaces dR)
+                # homogeneous deformation of the full pair vector, image shift
+                # included (jax_md convention: F replaces dR)
                 dr_vec = space.raw_transform(perturbation, dr_vec)
         return dr_vec, idx
 

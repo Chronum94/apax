@@ -96,29 +96,14 @@ def atoms_to_inputs(
         "box": [],
     }
 
-    box = atoms_list[0].cell.array
-    pbc = is_periodic(box)
-
+    # Positions are Cartesian for periodic and gas-phase structures alike; the
+    # periodic shifts live in the neighbor list offsets. So datasets may mix both.
     for atoms in atoms_list:
         box = (atoms.cell.array * unit_dict[pos_unit]).astype(DTYPE)
         box = box.T  # takes row and column convention of ase into account
+        is_periodic(box)  # raises for partially periodic cells
         inputs["box"].append(box)
-
-        is_pbc = is_periodic(box)
-
-        if pbc != is_pbc:
-            raise ValueError(
-                "Apax does not support dataset periodic and non periodic structures"
-            )
-
-        if is_pbc:
-            atoms.positions = (atoms.positions * unit_dict[pos_unit]).astype(DTYPE)
-            frac_pos = atoms.get_scaled_positions()
-            inputs["positions"].append(np.array(frac_pos))
-        else:
-            inputs["positions"].append(
-                (atoms.positions * unit_dict[pos_unit]).astype(DTYPE)
-            )
+        inputs["positions"].append((atoms.positions * unit_dict[pos_unit]).astype(DTYPE))
 
         inputs["numbers"].append(atoms.numbers.astype(np.int16))
         inputs["n_atoms"].append(len(atoms))

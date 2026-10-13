@@ -13,9 +13,8 @@ log = logging.getLogger(__name__)
 
 def compute_nl(positions, box, r_max):
     """
-    Computes the neighbor list for a single structure.
-    For periodic systems, positions are assumed to be in
-    fractional coordinates.
+    Computes the neighbor list for a single structure from Cartesian positions.
+    Offsets are the Cartesian periodic shifts (zero for gas phase).
 
     Parameters
     ----------
@@ -45,7 +44,6 @@ def compute_nl(positions, box, r_max):
         offsets = np.full([n_neighbors, 3], 0)
 
     else:
-        positions = positions @ box.T
         calculator = NeighborList(cutoff=r_max, full_list=True)
         idxs_i, idxs_j, offsets = calculator.compute(
             points=positions, box=box.T, periodic=True, quantities="ijS"
