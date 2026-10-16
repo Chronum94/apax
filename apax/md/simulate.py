@@ -101,6 +101,13 @@ def nbr_update_options_npt(state):
     return {"box": box}
 
 
+def nbr_f32(position, nbr_kwargs):
+    """Neighbour lists only need distances to well within the skin, so build and
+    check them in f32 (the integrator keeps f64 positions)."""
+    kw = {k: jnp.asarray(v, jnp.float32) for k, v in nbr_kwargs.items()}
+    return jnp.asarray(position, jnp.float32), kw
+
+
 def remove_constrained_dof(init_fn, n_constrained_dof):
     """jax_md sizes the thermostat chain for all 3N degrees of freedom.
     Constrained ones carry no kinetic energy, so they are removed here.
@@ -250,9 +257,8 @@ def handle_overflow(neighbor_fn, state, nbr_options, extra_capacity, traj_handle
     with logging_redirect_tqdm():
         log.warning("step %d: neighbor list invalid, reallocating.", step)
     traj_handler.reset_buffer()
-    return neighbor_fn.allocate(
-        state.position, extra_capacity=extra_capacity, **nbr_options(state)
-    )
+    position, kw = nbr_f32(state.position, nbr_options(state))
+    return neighbor_fn.allocate(position, extra_capacity=extra_capacity, **kw)
 
 
 def maybe_save_checkpoint(mngr, state, step, checkpoint_interval, sim_time_per_step):
@@ -333,7 +339,7 @@ def run_sim(
     )
 
     neighbor = sim_fns.neighbor_fn.allocate(
-        system.positions, extra_capacity=extra_capacity
+        nbr_f32(system.positions, {})[0], extra_capacity=extra_capacity
     )
 
     state = init_fn(
@@ -392,7 +398,8 @@ def run_sim(
             state = apply_constraints(state)
 
             nbr_kwargs = nbr_options(state)
-            neighbor = neighbor.update(state.position, **nbr_kwargs)
+            nbr_position, nbr_f32_kwargs = nbr_f32(state.position, nbr_kwargs)
+            neighbor = neighbor.update(nbr_position, **nbr_f32_kwargs)
 
             condition = step % sampling_rate == 0
             checks_passed = jax.lax.cond(
