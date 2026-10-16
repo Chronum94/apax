@@ -18,7 +18,11 @@ from jax import tree_util
 from jax.sharding import NamedSharding
 from jax.sharding import PartitionSpec as P
 
-from apax.data.preprocessing import compute_nl, prefetch_to_single_device
+from apax.data.preprocessing import (
+    compute_nl,
+    pad_sorted_nl,
+    prefetch_to_single_device,
+)
 from apax.utils.convert import (
     atoms_to_inputs,
     atoms_to_labels,
@@ -48,7 +52,7 @@ def pad_nl(idx, offsets, max_neighbors):
         Tuple containing padded neighbor indices array and offsets array.
     """
     zeros_to_add = max_neighbors - idx.shape[1]
-    idx = np.pad(idx, ((0, 0), (0, zeros_to_add)), "constant").astype(np.int16)
+    idx = np.concatenate([idx, pad_sorted_nl(idx, zeros_to_add)], axis=1).astype(np.int16)
     offsets = np.pad(offsets, ((0, zeros_to_add), (0, 0)), "constant")
     return idx, offsets
 
@@ -490,6 +494,7 @@ class BatchProcessor:
 
         for i, (idx, offset) in enumerate(zip(idxs, offsets)):
             inputs["idx"][i, :, : idx.shape[1]] = idx
+            inputs["idx"][i, :, idx.shape[1] :] = pad_sorted_nl(idx, max_nbrs - idx.shape[1])
             inputs["offsets"][i, : offset.shape[0], :] = offset
 
         return inputs, labels

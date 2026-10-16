@@ -16,6 +16,7 @@ from vesin import NeighborList
 
 from apax.config.train_config import Config
 from apax.data.input_pipeline import CachedInMemoryDataset, OTFInMemoryDataset
+from apax.data.preprocessing import pad_sorted_nl, sort_by_centre
 from apax.md.function_transformations import ProcessStress
 from apax.train.checkpoints import (
     canonicalize_energy_model_parameters,
@@ -469,10 +470,11 @@ class ASECalculator(Calculator):
 
         zeros_to_add = self.padded_length - len(idxs_i)
 
-        self.neighbors = np.array([idxs_i, idxs_j], dtype=np.int32)
-        self.neighbors = np.pad(self.neighbors, ((0, 0), (0, zeros_to_add)), "constant")
-
-        offsets = np.matmul(offsets, box)
+        neighbors = np.array([idxs_i, idxs_j], dtype=np.int32)
+        neighbors, offsets = sort_by_centre(neighbors, np.matmul(offsets, box))
+        self.neighbors = np.concatenate(
+            [neighbors, pad_sorted_nl(neighbors, zeros_to_add)], axis=1
+        )
         self.offsets = np.pad(offsets, ((0, zeros_to_add), (0, 0)), "constant")
 
     def calculate(self, atoms, properties=["energy"], system_changes=all_changes):

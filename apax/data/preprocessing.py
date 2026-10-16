@@ -52,7 +52,26 @@ def compute_nl(positions, box, r_max):
         )
         neighbor_idxs = np.array([idxs_i, idxs_j], dtype=np.int32)
         offsets = np.matmul(offsets, box.T)
-    return neighbor_idxs, offsets
+    return sort_by_centre(neighbor_idxs, offsets)
+
+
+def sort_by_centre(neighbor_idxs, offsets):
+    """Order pairs by centre atom (row 1), then neighbour.
+
+    The descriptor's segment sums over centres are flagged `indices_are_sorted`,
+    which lets XLA accumulate runs instead of issuing contended atomics. XLA does
+    not check the flag, so every neighbour list fed to the model must be sorted.
+    """
+    order = np.lexsort((neighbor_idxs[0], neighbor_idxs[1]))
+    return neighbor_idxs[:, order], offsets[order]
+
+
+def pad_sorted_nl(idx, n_pad):
+    """Padding pairs that keep a centre-sorted list sorted: self-pairs on the last
+    centre atom (zero displacement and offset, so the model masks them like the
+    former (0, 0) padding)."""
+    last = idx[1, -1] if idx.shape[1] else 0
+    return np.full((2, n_pad), last, dtype=idx.dtype)
 
 
 def get_shrink_wrapped_cell(positions):
