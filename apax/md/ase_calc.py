@@ -292,7 +292,8 @@ class ASECalculator(Calculator):
                 ensembled_props.update(props)
 
             elif ensemble_config.kind == "shallow":
-                # For a shallow ensemble, only energy and potentially forces are ensembled
+                # For a shallow ensemble, energies are always ensembled; forces and
+                # stresses only with the per-member gradients (force_variance)
                 ensembled_props.add("energy")
 
                 force_variance = self.force_variance
@@ -301,6 +302,8 @@ class ASECalculator(Calculator):
 
                 if force_variance:
                     ensembled_props.add("forces")
+                    if "stress" in props:
+                        ensembled_props.add("stress")
 
             for p in ensembled_props:
                 props.add(f"{p}_uncertainty")

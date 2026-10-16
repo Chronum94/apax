@@ -129,6 +129,8 @@ def test_shallow_ensemble_with_force_variance():
         "energy_ensemble",
         "forces_uncertainty",
         "forces_ensemble",
+        "stress_uncertainty",
+        "stress_ensemble",
     ]
     assert sorted(calc.implemented_properties) == sorted(expected_properties)
 

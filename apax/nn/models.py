@@ -13,7 +13,6 @@ from apax.layers.descriptor.gaussian_moment_descriptor import GaussianMomentDesc
 from apax.layers.distances import make_distance_fn
 from apax.layers.empirical import EmpiricalEnergyTerm
 from apax.layers.masking import mask_by_atom, mask_hessian
-from apax.layers.properties import stress_times_vol
 from apax.layers.readout import AtomisticReadout
 from apax.layers.scaling import PerElementScaleShift
 from apax.utils.math import fp64_sum
@@ -201,18 +200,24 @@ def make_mean_energy_fn(energy_fn):
     return mean_energy_fn
 
 
-def make_member_chunk_jac(energy_model, start, end):
-    def energy_chunk_fn(R, Z, neighbor, box, offsets):
-        Ei = energy_model(R, Z, neighbor, box, offsets)[start:end]
-        return Ei
+def _member_std(x):
+    """Standard deviation over the leading (member) axis, with Bessel's correction."""
+    n_ens = x.shape[0]
+    mean = jnp.mean(x, axis=0)
+    return jnp.sqrt(fp64_sum((x - mean) ** 2, axis=0) / (n_ens - 1))
 
-    grad_i_fn = jax.jacrev(energy_chunk_fn)
-    return grad_i_fn
+
+def _symmetrize(dE_dF):
+    return 0.5 * (dE_dF + jnp.swapaxes(dE_dF, -1, -2))
 
 
 class ShallowEnsembleModel(nn.Module):
-    """Transforms an EnergyModel into one that also predicts derivatives the total energy.
-    Can calculate forces and stress tensors.
+    """Transforms an EnergyModel with a shallow-ensemble readout into one that
+    predicts the ensemble mean and spread of energies, forces and stresses.
+
+    With `force_variance`, the per-member forces (and stresses) come from one forward
+    pass and one VJP per member, vmapped over the members (or `lax.map`ped in batches
+    of `chunk_size`). Without it, only the gradient of the mean energy is computed.
     """
 
     energy_model: EnergyModel = EnergyModel()
@@ -229,65 +234,56 @@ class ShallowEnsembleModel(nn.Module):
         box,
         offsets,
     ):
-        energy_ens, properties = self.energy_model(R, Z, neighbor, box, offsets)
-        # The two functions below drop the calculation of properties
-        mean_energy_fn = make_mean_energy_fn(self.energy_model)
-        energy_fn = make_energy_only_model(self.energy_model)
+        def energy_fn(R, F):
+            return self.energy_model(R, Z, neighbor, box, offsets, F)
 
-        n_ens = energy_ens.shape[0]
-        divisor = 1 / (n_ens - 1)
-        energy_mean = jnp.mean(energy_ens)
-        energy_variance = divisor * fp64_sum((energy_ens - energy_mean) ** 2)
+        identity = jnp.eye(R.shape[1], dtype=R.dtype)
+
+        if self.force_variance:
+            energy_ens, vjp_fn, properties = jax.vjp(energy_fn, R, identity, has_aux=True)
+            n_ens = energy_ens.shape[0]
+            cotangents = jnp.eye(n_ens, dtype=energy_ens.dtype)
+            if self.chunk_size:
+                dE_dR, dE_dF = jax.lax.map(vjp_fn, cotangents, batch_size=self.chunk_size)
+            else:
+                dE_dR, dE_dF = jax.vmap(vjp_fn)(cotangents)
+            forces_ens = -dE_dR  # n_members x n_atoms x 3
+
+            forces = jnp.mean(forces_ens, axis=0)
+            stress_ens = _symmetrize(dE_dF)
+        else:
+
+            def mean_energy(R, F):
+                energy_ens, properties = energy_fn(R, F)
+                return jnp.mean(energy_ens), (energy_ens, properties)
+
+            grad_fn = jax.grad(mean_energy, argnums=(0, 1), has_aux=True)
+            (dE_dR, dE_dF), (energy_ens, properties) = grad_fn(R, identity)
+            forces = -dE_dR
 
         prediction = {
-            "energy": energy_mean,
+            "energy": jnp.mean(energy_ens),
             "energy_ensemble": energy_ens,
-            "energy_uncertainty": jnp.sqrt(energy_variance),
+            "energy_uncertainty": _member_std(energy_ens),
+            "forces": forces,
         }
         prediction.update(properties)
 
         if self.force_variance:
-            if not self.chunk_size:
-                forces_ens = -jax.jacrev(energy_fn)(R, Z, neighbor, box, offsets)
-            else:
-                with jax.ensure_compile_time_eval():
-                    if not n_ens % self.chunk_size == 0:
-                        m = "the chunksize needs to be a factor of the number of ensemble members"
-                        raise ValueError(m)
-
-                forces_ens = []
-                start = 0
-                for _ in range(n_ens // self.chunk_size):
-                    end = start + self.chunk_size
-                    jac_i_fn = make_member_chunk_jac(energy_fn, start, end)
-                    force_i = -jac_i_fn(R, Z, neighbor, box, offsets)
-                    forces_ens.append(force_i)
-                    start = end
-
-                n_atoms = R.shape[0]
-                forces_ens = jnp.array(forces_ens)
-                forces_ens = np.reshape(forces_ens, (n_ens, n_atoms, 3))
-
-            forces_mean = jnp.mean(forces_ens, axis=0)
-            forces_variance = divisor * fp64_sum((forces_ens - forces_mean) ** 2, axis=0)
-
-            prediction["forces"] = forces_mean
-            prediction["forces_uncertainty"] = jnp.sqrt(forces_variance)
-
-            forces_ens = jnp.transpose(forces_ens, (1, 2, 0))
-            prediction["forces_ensemble"] = forces_ens  # n_atoms x 3 x n_members
-
-        else:
-            forces_mean = -jax.grad(mean_energy_fn)(R, Z, neighbor, box, offsets)
-            prediction["forces"] = forces_mean
+            prediction["forces_uncertainty"] = _member_std(forces_ens)
+            # n_atoms x 3 x n_members
+            prediction["forces_ensemble"] = jnp.transpose(forces_ens, (1, 2, 0))
 
         if self.calc_stress:
-            stress = stress_times_vol(
-                mean_energy_fn, R, box, Z=Z, neighbor=neighbor, offsets=offsets
-            )
-            prediction["stress"] = stress
+            if self.force_variance:
+                prediction["stress"] = jnp.mean(stress_ens, axis=0)
+                prediction["stress_uncertainty"] = _member_std(stress_ens)
+                prediction["stress_ensemble"] = jnp.transpose(stress_ens, (1, 2, 0))
+            else:
+                prediction["stress"] = _symmetrize(dE_dF)
 
         if self.calc_hessian:
+            mean_energy_fn = make_mean_energy_fn(self.energy_model)
             hessian = jax.hessian(mean_energy_fn)(R, Z, neighbor, box, offsets)
             prediction["hessian"] = mask_hessian(hessian, Z)
 

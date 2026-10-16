@@ -88,9 +88,8 @@ class ShallowEnsembleConfig(BaseModel, extra="forbid"):
         Required for probabilistic force loss and calibration of force uncertainties.
         Can lead to better force metrics but but enabling it introduces some non-negligible cost.
     chunk_size : Optional[int], default = None
-        If set to an integer, the jacobian of ensemble energies wrt. to positions will be computed
-        in chunks of that size. This sacrifices some performance for the possibility to use relatively
-        large ensemble sizes.
+        If set to an integer, the per-member forces are computed in batches of that many
+        members (`lax.map`). This lowers peak memory for large ensembles at some cost in speed.
 
     Hint
     ----------
