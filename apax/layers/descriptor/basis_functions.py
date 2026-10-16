@@ -200,6 +200,26 @@ class RadialFunction(nn.Module):
         return radial_function
 
 
+@jax.custom_jvp
+def species_lookup(emb, Z):
+    """emb[Z] for per-pair species Z.
+
+    The gradient of this gather w.r.t. emb is a scatter-add of every pair into the
+    rows of the few species present: extreme atomic contention on GPUs. The tangent
+    is written as one_hot(Z) @ emb_dot, so its transpose (the gradient) is the GEMM
+    one_hot.T @ g; the primal stays a plain gather.
+    """
+    return emb[Z]
+
+
+@species_lookup.defjvp
+def _species_lookup_jvp(primals, tangents):
+    emb, Z = primals
+    emb_dot, _ = tangents
+    one_hot = jax.nn.one_hot(Z, emb.shape[0], dtype=emb.dtype)
+    return emb[Z], one_hot @ emb_dot
+
+
 class FactorizedRadialFunction(nn.Module):
     """Rank-d CP factorization of the species-pair radial coefficients:
     W[Z_centre, Z_nbr] = sum_k u_k(Z_centre) v_k(Z_nbr) C_k,  C_k: (n_basis, n_radial)
@@ -254,7 +274,7 @@ class FactorizedRadialFunction(nn.Module):
         core = self.core.reshape(-1, self.rank, self.n_radial)
 
         # Z_j is the centre atom, matching RadialFunction's embeddings[Z_j, Z_i]
-        w = self.centre_emb[Z_j] * self.nbr_emb[Z_i]
+        w = species_lookup(self.centre_emb, Z_j) * species_lookup(self.nbr_emb, Z_i)
         # Contraction order matters for speed (sum over k = rank, b = basis, r = radial):
         #   1. basis @ core per pair -> (P, k, r), then rank sum with w: flat GEMM became
         #      a GPU custom call and writes a k*r-per-pair intermediate (112 MB, 582k pairs).
