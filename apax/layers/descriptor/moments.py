@@ -20,10 +20,10 @@ def geometric_moments_packed(radial_function, dn, idx_i, n_atoms=None):
     u2 = jnp.stack([dn[:, a] * dn[:, b] for a, b in _U2], axis=-1)  # (pairs, 6)
     u3 = jnp.stack([dn[:, a] * dn[:, b] * dn[:, c] for a, b, c in _U3], axis=-1)  # (pairs, 10)
     r = radial_function[..., None]
-    m0 = jax.ops.segment_sum(radial_function, idx_i, n_atoms)
-    m1 = jax.ops.segment_sum(r * dn[:, None, :], idx_i, n_atoms)
-    p2 = jax.ops.segment_sum(r * u2[:, None, :], idx_i, n_atoms)  # (atoms, channels, 6)
-    p3 = jax.ops.segment_sum(r * u3[:, None, :], idx_i, n_atoms)  # (atoms, channels, 10)
+    m0 = jax.ops.segment_sum(radial_function, idx_i, n_atoms, indices_are_sorted=True)
+    m1 = jax.ops.segment_sum(r * dn[:, None, :], idx_i, n_atoms, indices_are_sorted=True)
+    p2 = jax.ops.segment_sum(r * u2[:, None, :], idx_i, n_atoms, indices_are_sorted=True)  # (atoms, channels, 6)
+    p3 = jax.ops.segment_sum(r * u3[:, None, :], idx_i, n_atoms, indices_are_sorted=True)  # (atoms, channels, 10)
     return [m0, m1, p2[..., _G2], p3[..., _G3]]
 
 
@@ -44,10 +44,10 @@ def geometric_moments(radial_function, dn, idx_i, n_atoms=None):
     third_moment = einops.repeat(second_moment, "n r s1 s2 -> n r s1 s2 1") * xyz3
 
     # shape: n_atoms x n_radial x (3)^(moment_number)
-    zero_moment = jax.ops.segment_sum(zero_moment, idx_i, n_atoms)
-    first_moment = jax.ops.segment_sum(first_moment, idx_i, n_atoms)
-    second_moment = jax.ops.segment_sum(second_moment, idx_i, n_atoms)
-    third_moment = jax.ops.segment_sum(third_moment, idx_i, n_atoms)
+    zero_moment = jax.ops.segment_sum(zero_moment, idx_i, n_atoms, indices_are_sorted=True)
+    first_moment = jax.ops.segment_sum(first_moment, idx_i, n_atoms, indices_are_sorted=True)
+    second_moment = jax.ops.segment_sum(second_moment, idx_i, n_atoms, indices_are_sorted=True)
+    third_moment = jax.ops.segment_sum(third_moment, idx_i, n_atoms, indices_are_sorted=True)
 
     moments = [zero_moment, first_moment, second_moment, third_moment]
 

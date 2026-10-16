@@ -73,7 +73,9 @@ class GaussianMomentDescriptor(nn.Module):
             moments = moment_fn(
                 self.radial_compression(radial_function), dn, idx_j, n_atoms
             )
-            moments[0] = jax.ops.segment_sum(radial_function, idx_j, n_atoms)
+            moments[0] = jax.ops.segment_sum(
+                radial_function, idx_j, n_atoms, indices_are_sorted=True
+            )
         else:
             moments = moment_fn(radial_function, dn, idx_j, n_atoms)
 

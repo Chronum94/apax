@@ -47,7 +47,9 @@ def make_distance_fn(init_box, inference_disp_fn=None):
         # R shape n_atoms x 3
         R = R.astype(jnp.float64)
         Ri = R[idx_i]
-        Rj = R[idx_j]
+        # idx_j (centre) is sorted in jax-md's sparse neighbour lists; flagging it lets
+        # XLA accumulate the gather's backward scatter per run instead of atomics.
+        Rj = jnp.take(R, idx_j, axis=0, mode="clip", indices_are_sorted=True)
 
         # dr_vec shape: neighbors x 3
         if np.all(init_box < 1e-6):
