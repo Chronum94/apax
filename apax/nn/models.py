@@ -34,9 +34,12 @@ class FeatureModel(nn.Module):
     init_box: np.array = field(default_factory=lambda: np.array([0.0, 0.0, 0.0]))
     inference_disp_fn: Any = None
     mask_atoms: bool = True
+    geometry_dtype: Any = jnp.float64
 
     def setup(self):
-        self.compute_distances = make_distance_fn(self.init_box, self.inference_disp_fn)
+        self.compute_distances = make_distance_fn(
+            self.init_box, self.inference_disp_fn, self.geometry_dtype
+        )
 
     def __call__(
         self,
@@ -80,9 +83,12 @@ class EnergyModel(nn.Module):
     init_box: np.array = field(default_factory=lambda: np.array([0.0, 0.0, 0.0]))
     mask_atoms: bool = True
     inference_disp_fn: Any = None
+    geometry_dtype: Any = jnp.float64
 
     def setup(self):
-        self.compute_distances = make_distance_fn(self.init_box, self.inference_disp_fn)
+        self.compute_distances = make_distance_fn(
+            self.init_box, self.inference_disp_fn, self.geometry_dtype
+        )
 
     def __call__(
         self,

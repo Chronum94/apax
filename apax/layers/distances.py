@@ -23,7 +23,7 @@ def get_disp_fn(displacement):
     return disp_fn
 
 
-def make_distance_fn(init_box, inference_disp_fn=None):
+def make_distance_fn(init_box, inference_disp_fn=None, geometry_dtype=jnp.float64):
     """Model which post processes the output of an atomistic model and
     adds empirical energy terms.
     """
@@ -39,13 +39,22 @@ def make_distance_fn(init_box, inference_disp_fn=None):
         mappable_displacement_fn = get_disp_fn(inference_disp_fn)
         displacement = vmap(mappable_displacement_fn, (0, 0, None, None), 0)
 
+    # `geometry_dtype` is the precision of positions, displacements and their gradients.
+    # f64 by default (training, ASE: stress consistent to finite differences); jax-md MD
+    # uses f32, since every pair-sized gather/scatter (and its backward) in f64 is slow
+    # on GPUs with low FP64 throughput and box-wrapped coordinates lose only ~1e-6 A.
+
     def compute_distances(R, neighbor, box, offsets, perturbation=None):
         # Distances
         idx = canonicalize_neighbors(neighbor)
         idx_i, idx_j = idx[0], idx[1]
 
         # R shape n_atoms x 3
-        R = R.astype(jnp.float64)
+        R = R.astype(geometry_dtype)
+        box = jnp.asarray(box, geometry_dtype)
+        offsets = jnp.asarray(offsets, geometry_dtype)
+        if perturbation is not None:
+            perturbation = jnp.asarray(perturbation, geometry_dtype)
         Ri = R[idx_i]
         # idx_j (centre) is sorted in jax-md's sparse neighbour lists; flagging it lets
         # XLA accumulate the gather's backward scatter per run instead of atomics.

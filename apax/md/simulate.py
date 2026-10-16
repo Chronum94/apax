@@ -558,6 +558,7 @@ def md_setup(model_config: Config, md_config: MDConfig):
         apply_mask=True,
         init_box=np.array(system.box),
         inference_disp_fn=displacement_fn,
+        geometry_dtype=jnp.float32,
     )
     disable_cell_list = md_config.disable_cell_list or np.all(system.box < 1e-6)
     neighbor_fn = partition.neighbor_list(

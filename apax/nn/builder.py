@@ -1,6 +1,7 @@
 import logging
 from pathlib import Path
 
+import jax.numpy as jnp
 import numpy as np
 
 # bundled triple-exponential repulsion coefficients
@@ -236,6 +237,7 @@ class ModelBuilder:
         apply_mask=True,
         init_box: np.array = np.array([0.0, 0.0, 0.0]),
         inference_disp_fn=None,
+        geometry_dtype=jnp.float64,
     ):
         log.debug("Building atomistic model")
 
@@ -254,6 +256,7 @@ class ModelBuilder:
             corrections=corrections,
             init_box=init_box,
             inference_disp_fn=inference_disp_fn,
+            geometry_dtype=geometry_dtype,
         )
         return model
 
