@@ -26,6 +26,7 @@ from apax.md.constraints import Constraint, ConstraintBase
 from apax.md.dynamics_checks import DynamicsCheckBase, DynamicsChecks
 from apax.md.io import H5TrajHandler, TrajHandler, truncate_trajectory_to_checkpoint
 from apax.md.md_checkpoint import load_md_state
+from apax.md.npt_cached import npt_nose_hoover_cached
 from apax.md.nvt_fused import nvt_nose_hoover_fused
 from apax.md.sim_utils import SimulationFunctions, System
 from apax.train.checkpoints import (
@@ -158,7 +159,7 @@ def get_ensemble(ensemble: Integrator, sim_fns, n_constrained_dof=0):
         thermostat_chain["tau"] *= dt
         barostat_chain["tau"] *= dt
 
-        init_fn, apply_fn = simulate.npt_nose_hoover(
+        init_fn, apply_fn = npt_nose_hoover_cached(
             energy,
             shift,
             dt,
