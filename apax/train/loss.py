@@ -308,10 +308,6 @@ class Loss:
 
         self.loss_fn = loss_functions[self.loss_type]
 
-    @property
-    def uses_spread(self) -> bool:
-        return getattr(self.loss_fn, "uses_spread", False)
-
     def __call__(self, inputs: dict, prediction: dict, label: dict) -> float:
         # TODO we may want to insert an additional `mask` argument for this method
 

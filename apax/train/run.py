@@ -71,7 +71,10 @@ def shallow_force_variance(config: Config, loss_fn: LossCollection):
     if not is_shallow_ensemble(config):
         return None, None
     derivative = {"forces", "stress"}
-    loss_needs = any(l.uses_spread and l.name in derivative for l in loss_fn.loss_list)
+    loss_needs = any(
+        getattr(l.loss_fn, "uses_spread", False) and l.name in derivative
+        for l in loss_fn.loss_list
+    )
     metric_needs = any(
         m.name in derivative and set(m.reductions) & set(UNCERTAINTY_REDUCTIONS)
         for m in config.metrics

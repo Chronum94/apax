@@ -184,22 +184,6 @@ class EnergyDerivativeModel(nn.Module):
         return prediction
 
 
-def make_mean_energy_fn(energy_fn):
-    def mean_energy_fn(
-        R: Array,
-        Z: Array,
-        neighbor: Union[partition.NeighborList, Array],
-        box,
-        offsets,
-        perturbation=None,
-    ):
-        e_ens, _ = energy_fn(R, Z, neighbor, box, offsets, perturbation)
-        E_mean = jnp.mean(e_ens)
-        return E_mean
-
-    return mean_energy_fn
-
-
 def _member_std(x):
     """Standard deviation over the leading (member) axis, with Bessel's correction."""
     n_ens = x.shape[0]
@@ -285,8 +269,7 @@ class ShallowEnsembleModel(nn.Module):
                 prediction["stress"] = _symmetrize(dE_dF)
 
         if self.calc_hessian:
-            mean_energy_fn = make_mean_energy_fn(self.energy_model)
-            hessian = jax.hessian(mean_energy_fn)(R, Z, neighbor, box, offsets)
+            hessian = jax.hessian(lambda R: jnp.mean(energy_fn(R, identity)[0]))(R)
             prediction["hessian"] = mask_hessian(hessian, Z)
 
         return prediction
