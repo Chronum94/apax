@@ -76,3 +76,49 @@ def test_single_model_to_shallow_ensemble(get_tmp_path, example_dataset, force_l
     assert ("train_forces_rll" in last) == (force_loss != "mse")
     assert "train_energy_rll" in last
 
+
+@pytest.mark.parametrize("num_data", (30,))
+@pytest.mark.parametrize("unit", ("steps", "epochs"))
+def test_loss_schedule(get_tmp_path, example_dataset, unit):
+    working_dir = get_tmp_path / str(uuid.uuid4())
+    data_path = get_tmp_path / "ds.extxyz"
+    write(data_path, example_dataset)
+    data = {"directory": working_dir.as_posix(), "data_path": data_path.as_posix()}
+    load_config_and_run_training(
+        TEST_PATH / "config_base.yaml", {"data": {**data, "experiment": "base"}}
+    )
+    load_config_and_run_training(
+        TEST_PATH / "config_ft.yaml",
+        {
+            "n_epochs": 3,
+            "data": {**data, "experiment": "ens"},
+            "model": {"ensemble": {"kind": "shallow", "n_members": N_MEMBERS}},
+            "loss": [
+                {"name": "energy", "loss_type": "nll"},
+                {"name": "forces", "loss_type": "nll"},
+            ],
+            "loss_schedule": {
+                "every": 2,
+                "unit": unit,
+                "cheap_loss": [
+                    {"name": "energy", "loss_type": "nll"},
+                    {"name": "forces", "loss_type": "mse"},
+                ],
+            },
+            "metrics": [{"name": "forces", "reductions": ["mae", "rll"]}],
+            "transfer_learning": {
+                "base_model_checkpoint": (working_dir / "base").as_posix(),
+                "freeze_layers": [],
+            },
+        },
+    )
+    rows = _log(working_dir / "ens")
+    assert len(rows) == 3
+    # the cheap steps have no per-member forces, so no training force RLL
+    assert "train_forces_rll" not in rows[0] and "val_forces_rll" in rows[0]
+    main = [np.isfinite(float(r["train_loss"])) for r in rows]
+    cheap = [np.isfinite(float(r["train_loss_cheap"])) for r in rows]
+    if unit == "epochs":  # epochs 0 and 2 main, 1 cheap
+        assert main == [True, False, True] and cheap == [False, True, False]
+    else:  # 4 steps per epoch: both kinds in every epoch
+        assert all(main) and all(cheap)

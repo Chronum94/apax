@@ -45,6 +45,7 @@ def fit(
     ema_handler: Optional[EMAParameters] = None,
     val_Metrics: Optional[metrics.Collection] = None,
     val_model: Optional[Callable] = None,
+    cheap_step: Optional[dict] = None,
 ):
     """
     Trains the model using the provided training dataset.
@@ -84,6 +85,9 @@ def fit(
     val_model : Callable, default = None
         Model used for validation, if it differs from `state.apply_fn` (e.g. one that
         also computes the per-member forces of a shallow ensemble).
+    cheap_step : dict, default = None
+        `loss_fn`, `model`, `every` and `unit` ("steps"/"epochs"): use `loss_fn` with
+        `model` except on every `every`-th step (or epoch), which uses the main loss.
     """
     if val_Metrics is None:
         val_Metrics = Metrics
@@ -104,6 +108,21 @@ def fit(
         val_Metrics=val_Metrics,
         val_model=val_model,
     )
+
+    if cheap_step:
+        cheap_train_step, _ = make_step_fns(
+            cheap_step["loss_fn"],
+            Metrics,
+            model=cheap_step["model"],
+            is_ensemble=is_ensemble,
+        )
+
+    def uses_main_loss(epoch, batch_idx):
+        if not cheap_step:
+            return True
+        if cheap_step["unit"] == "epochs":
+            return epoch % cheap_step["every"] == 0
+        return (epoch * train_steps_per_epoch + batch_idx) % cheap_step["every"] == 0
 
     state, start_epoch = load_state(state, latest_dir, ema_handler)
     if start_epoch >= n_epochs:
@@ -148,6 +167,7 @@ def fit(
                 callbacks.on_epoch_begin(epoch=epoch + 1)
 
                 epoch_loss.update({"train_loss": 0.0})
+                loss_sums = {"main": [0.0, 0], "cheap": [0.0, 0]}
                 train_batch_metrics = Metrics.empty()
 
                 batch_pbar = trange(
@@ -164,22 +184,30 @@ def fit(
                     callbacks.on_train_batch_begin(batch=batch_idx)
 
                     batch = next(batch_train_ds)
+                    main = uses_main_loss(epoch, batch_idx)
+                    step_fn = train_step if main else cheap_train_step
                     (
                         (state, train_batch_metrics),
                         batch_loss,
-                    ) = train_step(
+                    ) = step_fn(
                         (state, train_batch_metrics),
                         batch,
                     )
                     if ema_handler:
                         ema_handler.update(state.params, epoch)
 
-                    epoch_loss["train_loss"] += jnp.mean(batch_loss)
+                    sums = loss_sums["main" if main else "cheap"]
+                    sums[0] += jnp.mean(batch_loss)
+                    sums[1] += 1
                     callbacks.on_train_batch_end(batch=batch_idx)
                     batch_pbar.update()
 
-                epoch_loss["train_loss"] /= train_steps_per_epoch
-                epoch_loss["train_loss"] = float(epoch_loss["train_loss"])
+                def mean_loss(total, count):
+                    return float(total / count) if count else float("nan")
+
+                epoch_loss["train_loss"] = mean_loss(*loss_sums["main"])
+                if cheap_step:
+                    epoch_loss["train_loss_cheap"] = mean_loss(*loss_sums["cheap"])
 
                 epoch_metrics = {
                     f"train_{key}": float(val)

@@ -323,6 +323,27 @@ class LossConfig(BaseModel, extra="forbid"):
     parameters: Optional[dict[str, Any]] = Field(default_factory=dict)
 
 
+class LossSchedule(BaseModel, extra="forbid"):
+    """
+    Use the main `loss` only on every `every`-th step (or epoch) and the cheaper
+    `cheap_loss` otherwise, e.g. a probabilistic force loss (one backward pass per
+    shallow-ensemble member) every few steps and energy NLL + force MSE in between.
+
+    Parameters
+    ----------
+    every : int
+        Period of the main loss.
+    unit : "steps" | "epochs", default = "steps"
+        Whether `every` counts optimizer steps or epochs.
+    cheap_loss : List of :class:`.LossConfig`
+        Loss used on the other steps (or epochs).
+    """
+
+    every: PositiveInt
+    unit: Literal["steps", "epochs"] = "steps"
+    cheap_loss: List[LossConfig]
+
+
 class CSVCallback(BaseModel, frozen=True, extra="forbid"):
     """
     Configuration of the CSVCallback.
@@ -497,6 +518,8 @@ class Config(BaseModel, frozen=True, extra="forbid"):
         | Metrics configuration.
     loss : List of :class:`.LossConfig`
         | Loss configuration.
+    loss_schedule : :class:`.LossSchedule`, optional
+        | Alternate `loss` with a cheaper loss every few steps or epochs.
     optimizer : :class:`.OptimizerConfig`
         | Loss optimizer configuration.
     weight_average : :class:`.WeightAverage`, optional
@@ -524,6 +547,7 @@ class Config(BaseModel, frozen=True, extra="forbid"):
     model: ModelConfig = Field(GMNNConfig(name="gmnn"), discriminator="name")
     metrics: List[MetricsConfig] = []
     loss: List[LossConfig]
+    loss_schedule: Optional[LossSchedule] = None
     optimizer: OptimizerConfig = OptimizerConfig()
     weight_average: Optional[WeightAverage] = None
     callbacks: List[CallBack] = [CSVCallback(name="csv")]

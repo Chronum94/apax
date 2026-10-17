@@ -237,8 +237,15 @@ def run(user_config: Union[str, os.PathLike, dict], log_level="error"):
     callbacks = initialize_callbacks(config, config.data.model_version_path)
     loss_fn = initialize_loss_fn(config.loss)
     train_fv, val_fv = shallow_force_variance(config, loss_fn)
+    schedule = config.loss_schedule
+    cheap_loss_fn, cheap_fv = None, train_fv
+    if schedule:
+        cheap_loss_fn = initialize_loss_fn(schedule.cheap_loss)
+        cheap_fv = shallow_force_variance(config, cheap_loss_fn)[0]
     Metrics = initialize_metrics(
-        config.metrics, predicted_uncertainties(config, train_fv), strict=False
+        config.metrics,
+        predicted_uncertainties(config, train_fv and cheap_fv),
+        strict=False,
     )
     val_Metrics = initialize_metrics(
         config.metrics, predicted_uncertainties(config, val_fv)
@@ -270,6 +277,17 @@ def run(user_config: Union[str, os.PathLike, dict], log_level="error"):
     if val_fv != train_fv:
         log.info("Per-member forces only for validation")
         val_model = jax.vmap(build(val_fv).apply, in_axes=(None, 0, 0, 0, 0, 0))
+    cheap_step = None
+    if schedule:
+        cheap_model = batched_model
+        if cheap_fv != train_fv:
+            cheap_model = jax.vmap(build(cheap_fv).apply, in_axes=(None, 0, 0, 0, 0, 0))
+        cheap_step = {
+            "loss_fn": cheap_loss_fn,
+            "model": cheap_model,
+            "every": schedule.every,
+            "unit": schedule.unit,
+        }
 
     if config.model.ensemble and config.model.ensemble.kind == "full":
         n_full_models = config.model.ensemble.n_members
@@ -323,5 +341,6 @@ def run(user_config: Union[str, os.PathLike, dict], log_level="error"):
         ema_handler=ema_handler,
         val_Metrics=val_Metrics,
         val_model=val_model,
+        cheap_step=cheap_step,
     )
     log.info("Finished training")
