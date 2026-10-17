@@ -5,7 +5,7 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 from flax import traverse_util
-from flax.core.frozen_dict import freeze
+from flax.core.frozen_dict import freeze, unfreeze
 from optax._src import base
 
 from apax.optimizer.optimizers import ademamix, sam
@@ -110,6 +110,17 @@ def rank_stacked(inner, rank):
         return new, state
 
     return optax.GradientTransformation(init, update)
+
+
+def readout_output_layers(params) -> set:
+    """Paths of the last dense layer of every readout ("readout/dense_<last>")."""
+    last = {}
+    for path in traverse_util.flatten_dict(unfreeze(params)):
+        for i, name in enumerate(path[:-1]):
+            if name == "readout" and path[i + 1].startswith("dense_"):
+                prefix, layer = path[: i + 1], int(path[i + 1].removeprefix("dense_"))
+                last[prefix] = max(last.get(prefix, -1), layer)
+    return {prefix + (f"dense_{layer}",) for prefix, layer in last.items()}
 
 
 def get_opt(
@@ -238,6 +249,7 @@ def get_opt(
             partition_optimizers["pair_core"] = rank_stacked(per_slice, muon_core_rank)
 
     param_groups = list(partition_optimizers.keys())
+    output_layers = readout_output_layers(params)
 
     def get_param_group(path, x):
         """
@@ -251,7 +263,9 @@ def get_opt(
                 return "frozen"
 
         p_name = path[-1]
-        if muon_lr is not None and p_name == "w" and x.shape[-1] == 1:
+        # a readout's output layer (one column, or one per shallow-ensemble member)
+        # is not a hidden matrix: orthogonalising it would couple the members
+        if muon_lr is not None and p_name == "w" and path[:-1] in output_layers:
             return "w_out"
         p_name = p_name if p_name in param_groups else "default"
         return p_name

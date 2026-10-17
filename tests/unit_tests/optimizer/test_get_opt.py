@@ -45,3 +45,40 @@ def test_get_opt():
     assert flat_params[-2] > flat_params[1]
     assert flat_params[0] < flat_params[1]
     assert flat_params[-1] < flat_params[1]
+
+
+def test_muon_keeps_readout_output_layers_on_adam():
+    import numpy as np
+
+    from apax.optimizer.get_optimizer import readout_output_layers
+
+    rng = np.random.default_rng(0)
+    params = freeze(
+        {
+            "energy_model": {
+                "readout": {
+                    "dense_0": {"w": jnp.asarray(rng.normal(size=(6, 8)))},
+                    "dense_1": {"w": jnp.asarray(rng.normal(size=(8, 8)))},
+                    "dense_2": {"w": jnp.asarray(rng.normal(size=(8, 4)))},  # 4 members
+                },
+                "head": {"readout": {"dense_0": {"w": jnp.ones((8, 1))}}},
+            }
+        }
+    )
+    assert readout_output_layers(params) == {
+        ("energy_model", "readout", "dense_2"),
+        ("energy_model", "head", "readout", "dense_0"),
+    }
+
+    nn_lr = 0.01
+    opt = get_opt(
+        params, 1, 10, nn_lr=nn_lr, name="muon", kwargs={"muon_lr": 0.02},
+        schedule={"name": "linear", "transition_begin": 0, "end_value": 1e-6},
+    )
+    grads = tree_util.tree_map(lambda x: jnp.asarray(rng.normal(size=x.shape)), params)
+    updates, _ = opt.update(grads, opt.init(params), params)
+    out = np.abs(np.asarray(updates["energy_model"]["readout"]["dense_2"]["w"]))
+    hidden = np.abs(np.asarray(updates["energy_model"]["readout"]["dense_1"]["w"]))
+    # Adam's first step is lr * sign(g) per element; Muon's is not
+    np.testing.assert_allclose(out, nn_lr, rtol=1e-3)
+    assert not np.allclose(hidden, hidden.flat[0], rtol=1e-2)
