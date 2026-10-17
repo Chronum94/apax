@@ -295,7 +295,7 @@ def run(user_config: Union[str, os.PathLike, dict], log_level="error"):
     state = create_train_state(batched_model, params, tx)
 
     if do_transfer_learning:
-        state = transfer_parameters(state, config.transfer_learning)
+        state = transfer_parameters(state, config.transfer_learning, config.seed)
 
     if config.weight_average:
         ema_handler = EMAParameters(

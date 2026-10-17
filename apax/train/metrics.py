@@ -115,7 +115,8 @@ class GaussianScores(metrics.Metric):
     @classmethod
     def from_model_output(cls, err2, var, mask=None, **_):
         err2, mask = metrics._broadcast_masks(err2, mask)
-        mask = jnp.broadcast_to(mask, err2.shape)
+        # components fixed by symmetry (zero spread and zero error) carry no information
+        mask = jnp.broadcast_to(mask, err2.shape) & ((var > 0) | (err2 > 0))
         var = jnp.where(mask, var, 1.0)
         err2 = jnp.where(mask, err2, 1.0)
 

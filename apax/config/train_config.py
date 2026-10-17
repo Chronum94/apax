@@ -418,11 +418,15 @@ class TransferLearningConfig(BaseModel, extra="forbid"):
     base_model_checkpoint: Path to the folder containing a pre-trained model ckpt.
     reset_layers: List of layer names for which the parameters will be reinitialized.
     freeze_layers: List of layer names for which the parameters will be frozen during training.
+    ensemble_init_noise: When a single model's readout is loaded into a shallow ensemble,
+        each member starts as a copy of the output layer plus Gaussian noise of this many
+        times its RMS.
     """
 
     base_model_checkpoint: Optional[str] = None
     reset_layers: Optional[List[str]] = Field(default_factory=list)
     freeze_layers: Optional[List[str]] = Field(default_factory=list)
+    ensemble_init_noise: NonNegativeFloat = 0.1
 
     @model_validator(mode="after")
     def normalize_null(self):
