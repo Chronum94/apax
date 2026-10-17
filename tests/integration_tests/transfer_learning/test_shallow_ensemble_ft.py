@@ -60,6 +60,10 @@ def test_single_model_to_shallow_ensemble(get_tmp_path, example_dataset, force_l
     (out,) = out
     assert base[out].shape[-1] == 1 and ens[out].shape[-1] == N_MEMBERS
     assert np.std(ens[out], axis=-1).min() > 0  # members differ
+    # the backbone trained (NaN gradients are zeroed by the optimizer, which would
+    # silently freeze it)
+    hidden = [k for k in base if k.endswith("readout/dense_0/w")]
+    assert hidden and not np.allclose(base[hidden[0]], ens[hidden[0]])
 
     rows = _log(working_dir / "ens")
     assert len(rows) == 2
@@ -71,3 +75,4 @@ def test_single_model_to_shallow_ensemble(get_tmp_path, example_dataset, force_l
     # the training step only has the per-member forces if the force loss uses them
     assert ("train_forces_rll" in last) == (force_loss != "mse")
     assert "train_energy_rll" in last
+

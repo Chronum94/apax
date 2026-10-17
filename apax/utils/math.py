@@ -37,6 +37,7 @@ def center_of_mass(positions: Array, masses: Array) -> Array:
 
 
 def inv_and_det_3x3(Sigma: Array) -> tuple[Array, Array]:
+    """Analytic inverse and determinant of a batch of positive definite 3x3 matrices."""
     a00 = Sigma[..., 0, 0]
     a01 = Sigma[..., 0, 1]
     a02 = Sigma[..., 0, 2]
@@ -54,8 +55,10 @@ def inv_and_det_3x3(Sigma: Array) -> tuple[Array, Array]:
         + a02 * (a10 * a21 - a11 * a20)
     )
 
-    det_safe = jnp.maximum(jnp.abs(det), 1e-6) * jnp.sign(det)
-    invDet = 1.0 / det_safe
+    # no clamping: callers pass a positive definite matrix (clamping the determinant
+    # at any fixed value breaks the inverse once det is below it, e.g. force
+    # covariances with sigma < 0.1 eV/A have det < 1e-6)
+    invDet = 1.0 / det
     inv00 = (a11 * a22 - a12 * a21) * invDet
     inv01 = (a02 * a21 - a01 * a22) * invDet
     inv02 = (a01 * a12 - a02 * a11) * invDet
@@ -75,3 +78,9 @@ def inv_and_det_3x3(Sigma: Array) -> tuple[Array, Array]:
     row2 = jnp.stack([inv20, inv21, inv22], axis=-1)
     Sigma_inv = jnp.stack([row0, row1, row2], axis=-2)
     return Sigma_inv, det
+
+
+def safe_sqrt(x: Array) -> Array:
+    """sqrt with a zero (instead of infinite) derivative at x = 0."""
+    positive = x > 0
+    return jnp.where(positive, jnp.sqrt(jnp.where(positive, x, 1.0)), 0.0)

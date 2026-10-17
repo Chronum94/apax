@@ -111,7 +111,10 @@ def build_hessian_neighbor_fns(
 def make_ensemble(model):
     def ensemble(positions, Z, idx, box, offsets):
         results = model(positions, Z, idx, box, offsets)
-        uncertainty = {k + "_uncertainty": jnp.std(v, axis=0) for k, v in results.items()}
+        # ddof=1, like shallow ensembles
+        uncertainty = {
+            k + "_uncertainty": jnp.std(v, axis=0, ddof=1) for k, v in results.items()
+        }
         ensemble = {k + "_ensemble": v for k, v in results.items()}
         results = {k: jnp.mean(v, axis=0) for k, v in results.items()}
         if "forces_ensemble" in ensemble.keys():

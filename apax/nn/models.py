@@ -15,7 +15,7 @@ from apax.layers.empirical import EmpiricalEnergyTerm
 from apax.layers.masking import mask_by_atom, mask_hessian
 from apax.layers.readout import AtomisticReadout
 from apax.layers.scaling import PerElementScaleShift
-from apax.utils.math import fp64_sum
+from apax.utils.math import fp64_sum, safe_sqrt
 from apax.utils.transform import make_energy_only_model
 
 DisplacementFn = Callable[[Array, Array], Array]
@@ -204,7 +204,9 @@ def _member_std(x):
     """Standard deviation over the leading (member) axis, with Bessel's correction."""
     n_ens = x.shape[0]
     mean = jnp.mean(x, axis=0)
-    return jnp.sqrt(fp64_sum((x - mean) ** 2, axis=0) / (n_ens - 1))
+    # safe_sqrt: members that agree exactly (padded atoms, components fixed by
+    # symmetry) would otherwise give an infinite derivative and NaN gradients
+    return safe_sqrt(fp64_sum((x - mean) ** 2, axis=0) / (n_ens - 1))
 
 
 def _symmetrize(dE_dF):

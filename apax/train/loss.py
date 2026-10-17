@@ -45,6 +45,13 @@ def weighted_huber_loss(
     return loss
 
 
+def _floored_sigma(sigmas, parameters):
+    """sqrt(sigma^2 + eps^2): a smooth floor (default eps 1e-6, in the units of the
+    quantity). A hard clip has zero gradient below the floor."""
+    eps = parameters.get("eps", 1e-6)
+    return jnp.sqrt(sigmas**2 + eps**2)
+
+
 def crps_loss(
     label: jax.Array,
     prediction: jax.Array,
@@ -57,9 +64,7 @@ def crps_loss(
     """
     label = label[name]
     means = prediction[name]
-    sigmas = prediction[name + "_uncertainty"]
-
-    sigmas = jnp.clip(sigmas, min=1e-6)
+    sigmas = _floored_sigma(prediction[name + "_uncertainty"], parameters)
 
     norm_x = (label - means) / sigmas
     cdf = 0.5 * (1 + jsc.special.erf(norm_x / jnp.sqrt(2)))
@@ -85,11 +90,7 @@ def nll_loss(
     """
     label = label[name]
     means = prediction[name]
-    sigmas = prediction[name + "_uncertainty"]
-
-    eps = 1e-6
-    sigmas = jnp.clip(sigmas, min=eps)
-    variances = jnp.pow(sigmas, 2)
+    variances = _floored_sigma(prediction[name + "_uncertainty"], parameters) ** 2
 
     x1 = jnp.log(variances)
     x2 = ((means - label) ** 2) / variances
@@ -184,11 +185,15 @@ def nll_3x3(
         K - 1
     )  # Sample covariance matrix
 
-    Sigma = Sigma + jnp.eye(3)[None, None, ...] * 1e-5
+    # Jitter relative to the covariance's own scale (bounds the condition number at
+    # ~1/rel_jitter whatever the units or force magnitude), plus a tiny absolute
+    # floor so that a zero covariance (padded atoms) stays invertible.
+    rel_jitter = parameters.get("rel_jitter", 1e-4)
+    abs_jitter = parameters.get("abs_jitter", 1e-12)
+    scale = jnp.trace(Sigma, axis1=-2, axis2=-1)[..., None, None] / 3
+    Sigma = Sigma + (rel_jitter * scale + abs_jitter) * jnp.eye(3)
 
     Sigma_inv, det = inv_and_det_3x3(Sigma)
-
-    det = jnp.maximum(det, 1e-12)
     log_det = jnp.log(det)
 
     # diff.T @ Sigma_inv @ diff

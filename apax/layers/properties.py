@@ -5,7 +5,7 @@ from jax import Array
 
 from apax.layers.masking import mask_by_atom
 from apax.layers.readout import AtomisticReadout
-from apax.utils.math import fp64_sum
+from apax.utils.math import fp64_sum, safe_sqrt
 
 
 def stress_times_vol(energy_fn, position: Array, box, **kwargs) -> Array:
@@ -128,7 +128,8 @@ class PropertyHead(nn.Module):
                 result = jnp.swapaxes(result, 0, 1)
 
             mean = jnp.mean(result, axis=0)
-            uncertainty = divisor * fp64_sum((mean - result) ** 2, axis=0)
+            # standard deviation, like energy_uncertainty and forces_uncertainty
+            uncertainty = safe_sqrt(divisor * fp64_sum((mean - result) ** 2, axis=0))
             output[self.pname] = mean
             output[self.pname + "_uncertainty"] = uncertainty
 
