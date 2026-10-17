@@ -299,6 +299,8 @@ class ASECalculator(Calculator):
                 force_variance = self.force_variance
                 if force_variance is None:
                     force_variance = ensemble_config.force_variance
+                if force_variance is None:
+                    force_variance = True
 
                 if force_variance:
                     ensembled_props.add("forces")

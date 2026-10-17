@@ -83,10 +83,11 @@ class ShallowEnsembleConfig(BaseModel, extra="forbid"):
     ----------
     n_members : int
         Number of ensemble members.
-    force_variance : bool, default = True
-        Whether or not to compute force uncertainties.
-        Required for probabilistic force loss and calibration of force uncertainties.
-        Can lead to better force metrics but but enabling it introduces some non-negligible cost.
+    force_variance : Optional[bool], default = None
+        Whether to compute the per-member forces (and stresses), needed for force
+        uncertainties. Costs one backward pass per member. None: in training, only
+        if a force/stress loss or metric uses the ensemble spread (validation-only if
+        just a metric does); at inference, always.
     chunk_size : Optional[int], default = None
         If set to an integer, the per-member forces are computed in batches of that many
         members (`lax.map`). This lowers peak memory for large ensembles at some cost in speed.
@@ -99,7 +100,7 @@ class ShallowEnsembleConfig(BaseModel, extra="forbid"):
 
     kind: Literal["shallow"] = "shallow"
     n_members: int
-    force_variance: bool = True
+    force_variance: Optional[bool] = None
     chunk_size: Optional[int] = None
 
 

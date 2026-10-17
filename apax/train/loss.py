@@ -240,6 +240,12 @@ def mass_weighted_hessian_loss(
     return (label_mw - prediction_mw) ** 2
 
 
+# losses that read the ensemble spread (`<name>_uncertainty` / `<name>_ensemble`),
+# not just the mean prediction
+crps_loss.uses_spread = True
+nll_loss.uses_spread = True
+nll_3x3.uses_spread = True
+
 loss_functions = {
     "mse": weighted_squared_error,
     "huber": weighted_huber_loss,
@@ -274,6 +280,10 @@ class Loss:
             )
 
         self.loss_fn = loss_functions[self.loss_type]
+
+    @property
+    def uses_spread(self) -> bool:
+        return getattr(self.loss_fn, "uses_spread", False)
 
     def __call__(self, inputs: dict, prediction: dict, label: dict) -> float:
         # TODO we may want to insert an additional `mask` argument for this method

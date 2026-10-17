@@ -43,6 +43,8 @@ def fit(
     is_ensemble=False,
     data_parallel=True,
     ema_handler: Optional[EMAParameters] = None,
+    val_Metrics: Optional[metrics.Collection] = None,
+    val_model: Optional[Callable] = None,
 ):
     """
     Trains the model using the provided training dataset.
@@ -77,7 +79,14 @@ def fit(
         Whether the model is an ensemble.
     data_parallel : bool, default = True
         Whether to use data parallelism.
+    val_Metrics : metrics.Collection, default = None
+        Metrics for the validation set, if they differ from the training metrics.
+    val_model : Callable, default = None
+        Model used for validation, if it differs from `state.apply_fn` (e.g. one that
+        also computes the per-member forces of a shallow ensemble).
     """
+    if val_Metrics is None:
+        val_Metrics = Metrics
 
     log.info("Beginning Training")
     callbacks.on_train_begin()
@@ -88,7 +97,12 @@ def fit(
     options = ocp.CheckpointManagerOptions(max_to_keep=2, save_interval_steps=1)
 
     train_step, val_step = make_step_fns(
-        loss_fn, Metrics, model=state.apply_fn, is_ensemble=is_ensemble
+        loss_fn,
+        Metrics,
+        model=state.apply_fn,
+        is_ensemble=is_ensemble,
+        val_Metrics=val_Metrics,
+        val_model=val_model,
     )
 
     state, start_epoch = load_state(state, latest_dir, ema_handler)
@@ -179,7 +193,7 @@ def fit(
 
                 if val_ds is not None:
                     epoch_loss.update({"val_loss": 0.0})
-                    val_batch_metrics = Metrics.empty()
+                    val_batch_metrics = val_Metrics.empty()
 
                     batch_pbar = trange(
                         0,
@@ -304,6 +318,8 @@ def make_step_fns(
     model: Any,
     is_ensemble: bool,
     return_predictions: bool = False,
+    val_Metrics: Optional[metrics.Collection] = None,
+    val_model: Optional[Any] = None,
 ) -> tuple[Callable, Callable]:
     """
     Creates JIT-compiled training and validation step functions.
@@ -326,6 +342,10 @@ def make_step_fns(
         return_predictions: bool, default = False
             If True, the validation step will return the
             raw model predictions in addition to metrics and loss.
+        val_Metrics: metrics.Collection, default = None
+            Metrics of the validation step; `Metrics` if None.
+        val_model: Any, default = None
+            Model of the validation step; `model` if None.
 
     Returns
     -------
@@ -334,7 +354,10 @@ def make_step_fns(
             - train_step: (carry, batch) -> (new_carry, loss)
             - val_step: (params, batch, metrics) -> (loss, metrics, [predictions])
     """
+    if val_Metrics is None:
+        val_Metrics = Metrics
     loss_calculator = partial(calc_loss, loss_fn=loss_fn, model=model)
+    val_loss_calculator = partial(calc_loss, loss_fn=loss_fn, model=val_model or model)
     grad_fn = jax.value_and_grad(loss_calculator, 0, has_aux=True)
 
     def update_step(state, inputs, labels):
@@ -344,10 +367,10 @@ def make_step_fns(
 
     if is_ensemble:
         update_fn = make_ensemble_update(update_step)
-        eval_fn = make_ensemble_eval(loss_calculator)
+        eval_fn = make_ensemble_eval(val_loss_calculator)
     else:
         update_fn = update_step
-        eval_fn = loss_calculator
+        eval_fn = val_loss_calculator
 
     @jax.jit
     def train_step(carry, batch) -> tuple[tuple[TrainState, metrics.Collection], float]:
@@ -370,7 +393,7 @@ def make_step_fns(
         inputs, labels = batch
         loss, predictions = eval_fn(params, inputs, labels)
 
-        new_batch_metrics = Metrics.single_from_model_output(
+        new_batch_metrics = val_Metrics.single_from_model_output(
             inputs=inputs, label=labels, prediction=predictions
         )
         batch_metrics = batch_metrics.merge(new_batch_metrics)

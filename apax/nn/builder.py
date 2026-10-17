@@ -291,6 +291,8 @@ class ModelBuilder:
         ):
             if force_variance is None:
                 force_variance = self.config["ensemble"]["force_variance"]
+            if force_variance is None:
+                force_variance = True
 
             log.info("Building ShallowEnsemble model")
             model = ShallowEnsembleModel(

@@ -15,7 +15,7 @@ from apax.optimizer import get_opt
 from apax.train.callbacks import initialize_callbacks
 from apax.train.checkpoints import create_params, create_train_state
 from apax.train.loss import Loss, LossCollection
-from apax.train.metrics import initialize_metrics
+from apax.train.metrics import UNCERTAINTY_REDUCTIONS, initialize_metrics
 from apax.train.parameters import EMAParameters
 from apax.train.trainer import fit
 from apax.transfer_learning import transfer_parameters
@@ -55,6 +55,47 @@ def setup_logging(log_file, log_level):
         datefmt="%H:%M:%S",
         handlers=[logging.FileHandler(log_file), logging.StreamHandler(sys.stderr)],
     )
+
+
+def is_shallow_ensemble(config: Config) -> bool:
+    ens = config.model.ensemble
+    return bool(ens) and ens.kind == "shallow" and ens.n_members > 1
+
+
+def shallow_force_variance(config: Config, loss_fn: LossCollection):
+    """Whether training and validation need the per-member forces of a shallow
+    ensemble: only if a force or stress loss (or metric) uses the ensemble spread.
+    An explicit `force_variance` in the ensemble config overrides this.
+    Returns (train, validation); (None, None) for other models.
+    """
+    if not is_shallow_ensemble(config):
+        return None, None
+    derivative = {"forces", "stress"}
+    loss_needs = any(l.uses_spread and l.name in derivative for l in loss_fn.loss_list)
+    metric_needs = any(
+        m.name in derivative and set(m.reductions) & set(UNCERTAINTY_REDUCTIONS)
+        for m in config.metrics
+    )
+    explicit = config.model.ensemble.force_variance
+    if explicit is not None:
+        if not explicit and (loss_needs or metric_needs):
+            raise ValueError(
+                "force_variance is False, but a force/stress loss or metric uses the"
+                " ensemble spread"
+            )
+        return explicit, explicit
+    return loss_needs, loss_needs or metric_needs
+
+
+def predicted_uncertainties(config: Config, force_variance):
+    """Quantities the model predicts an uncertainty for."""
+    if config.model.ensemble and config.model.ensemble.kind == "full":
+        return None
+    if not is_shallow_ensemble(config):
+        return set()
+    if force_variance:
+        return {"energy", "forces", "stress"}
+    return {"energy"}
 
 
 def initialize_loss_fn(loss_config_list: List[LossConfig]) -> LossCollection:
@@ -195,7 +236,13 @@ def run(user_config: Union[str, os.PathLike, dict], log_level="error"):
 
     callbacks = initialize_callbacks(config, config.data.model_version_path)
     loss_fn = initialize_loss_fn(config.loss)
-    Metrics = initialize_metrics(config.metrics)
+    train_fv, val_fv = shallow_force_variance(config, loss_fn)
+    Metrics = initialize_metrics(
+        config.metrics, predicted_uncertainties(config, train_fv), strict=False
+    )
+    val_Metrics = initialize_metrics(
+        config.metrics, predicted_uncertainties(config, val_fv)
+    )
 
     train_ds, val_ds, ds_stats = initialize_datasets(config)
 
@@ -207,13 +254,22 @@ def run(user_config: Union[str, os.PathLike, dict], log_level="error"):
             corr["amp_init"] = fit_pair_envelope(load_data_files(config.data)[0], ds_stats.elemental_shift, corr["r_max"])
             log.info("Pair envelope amplitudes initialised by least squares (median %.4f eV)", float(np.median(corr["amp_init"])))
     builder = Builder(model_dict)
-    model = builder.build_energy_derivative_model(
-        scale=ds_stats.elemental_scale,
-        shift=ds_stats.elemental_shift,
-        apply_mask=True,
-        init_box=init_box,
-    )
+
+    def build(force_variance):
+        return builder.build_energy_derivative_model(
+            scale=ds_stats.elemental_scale,
+            shift=ds_stats.elemental_shift,
+            apply_mask=True,
+            init_box=init_box,
+            force_variance=force_variance,
+        )
+
+    model = build(train_fv)
     batched_model = jax.vmap(model.apply, in_axes=(None, 0, 0, 0, 0, 0))
+    val_model = None
+    if val_fv != train_fv:
+        log.info("Per-member forces only for validation")
+        val_model = jax.vmap(build(val_fv).apply, in_axes=(None, 0, 0, 0, 0, 0))
 
     if config.model.ensemble and config.model.ensemble.kind == "full":
         n_full_models = config.model.ensemble.n_members
@@ -265,5 +321,7 @@ def run(user_config: Union[str, os.PathLike, dict], log_level="error"):
         is_ensemble=n_full_models > 1,
         data_parallel=config.data_parallel,
         ema_handler=ema_handler,
+        val_Metrics=val_Metrics,
+        val_model=val_model,
     )
     log.info("Finished training")
