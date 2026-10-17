@@ -78,6 +78,26 @@ def crps_loss(
     return crps
 
 
+def crps_ensemble_loss(
+    label: jax.Array,
+    prediction: jax.Array,
+    name: str,
+    parameters: dict = {},
+    inputs: dict = {},
+) -> jax.Array:
+    """Fair (unbiased) CRPS of the ensemble members themselves, without a Gaussian
+    assumption: mean_k |x_k - y| - sum_{k,l} |x_k - x_l| / (2 K (K - 1)).
+    Pairwise rather than sort-based (XLA's GPU sort is unreliable on some ROCm GPUs).
+    """
+    y = label[name][..., None]
+    members = prediction[name + "_ensemble"]  # members on the last axis
+    K = members.shape[-1]
+    skill = jnp.mean(jnp.abs(members - y), axis=-1)
+    pairwise = jnp.abs(members[..., :, None] - members[..., None, :])
+    spread = jnp.sum(pairwise, axis=(-2, -1)) / (2 * K * (K - 1))
+    return skill - spread
+
+
 def nll_loss(
     label: jax.Array,
     prediction: jax.Array,
@@ -248,6 +268,7 @@ def mass_weighted_hessian_loss(
 # losses that read the ensemble spread (`<name>_uncertainty` / `<name>_ensemble`),
 # not just the mean prediction
 crps_loss.uses_spread = True
+crps_ensemble_loss.uses_spread = True
 nll_loss.uses_spread = True
 nll_3x3.uses_spread = True
 
@@ -259,6 +280,7 @@ loss_functions = {
     "cosine_sim_exp_magnitude": force_angle_exponential_weight,
     "tril": stress_tril,
     "crps": crps_loss,
+    "crps_ensemble": crps_ensemble_loss,
     "nll": nll_loss,
     "nll_3x3": nll_3x3,
     "mw_hessian": mass_weighted_hessian_loss,

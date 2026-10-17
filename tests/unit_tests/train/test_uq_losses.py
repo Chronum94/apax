@@ -5,7 +5,7 @@ import pytest
 from scipy import integrate, stats
 
 from apax.nn.models import _member_std
-from apax.train.loss import crps_loss, nll_3x3, nll_loss
+from apax.train.loss import crps_ensemble_loss, crps_loss, nll_3x3, nll_loss
 from apax.utils.math import inv_and_det_3x3
 
 
@@ -74,7 +74,7 @@ def test_nll_and_crps_match_reference():
         np.testing.assert_allclose(crps[i], left + right, rtol=1e-6)
 
 
-@pytest.mark.parametrize("loss", [nll_loss, crps_loss, nll_3x3])
+@pytest.mark.parametrize("loss", [nll_loss, crps_loss, nll_3x3, crps_ensemble_loss])
 def test_finite_gradient_with_zero_spread(loss):
     """Padded atoms and components fixed by symmetry have members that agree exactly."""
 
@@ -95,3 +95,27 @@ def test_finite_gradient_with_zero_spread(loss):
     g = jax.grad(f)(0.2)
     assert np.isfinite(g) and g != 0
 
+
+def test_crps_ensemble():
+    rng = np.random.default_rng(3)
+    X = rng.normal(size=(4, 5, 8))  # members last
+    y = rng.normal(size=(4, 5))
+    got = np.asarray(
+        crps_ensemble_loss({"x": jnp.asarray(y)}, {"x_ensemble": jnp.asarray(X)}, "x")
+    )
+    K = X.shape[-1]
+    ref = np.abs(X - y[..., None]).mean(-1) - np.abs(
+        X[..., :, None] - X[..., None, :]
+    ).sum((-2, -1)) / (2 * K * (K - 1))
+    np.testing.assert_allclose(got, ref, rtol=1e-12)
+
+    # unbiased: for members drawn from N(mu, s^2) its mean is the Gaussian CRPS
+    mu, sig, yy = 0.3, 0.7, -0.2
+    draws = mu + sig * rng.normal(size=(20000, 4))
+    fair = crps_ensemble_loss(
+        {"x": jnp.full(20000, yy)}, {"x_ensemble": jnp.asarray(draws)}, "x"
+    )
+    gauss = crps_loss(
+        {"x": jnp.array([yy])}, {"x": jnp.array([mu]), "x_uncertainty": jnp.array([sig])}, "x"
+    )
+    np.testing.assert_allclose(float(jnp.mean(fair)), float(gauss[0]), rtol=0.02)
