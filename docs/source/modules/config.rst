@@ -42,6 +42,10 @@ Training Configuration
     :members:
     :exclude-members: model_config, model_computed_fields, model_fields
 
+.. autoclass:: apax.config.train_config.LossSchedule
+    :members:
+    :exclude-members: model_config, model_computed_fields, model_fields
+
 .. autoclass:: apax.config.train_config.TrainProgressbarConfig
     :members:
     :exclude-members: model_config, model_computed_fields, model_fields

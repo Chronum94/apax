@@ -48,12 +48,15 @@ model:
   #   - name: exponential
   #     r_max: 1.5
 
-  # if you would like to train model ensembles, this can be
-  # achieved with the following example.
-  # Hint: loss type hase to be changed to a probabilistic loss like nll or crps
+  # Shallow ensemble (members share everything but the readout's output layer).
+  # Train with a probabilistic loss (nll, crps, ...) on at least the energy, or the
+  # member spread is never trained. See the uncertainty usage guide.
   # ensemble:
-  #  kind: shallow
-  #  n_members: N
+  #   kind: shallow
+  #   n_members: 32
+  #   force_variance: null  # null: per-member forces only if a force/stress loss
+  #                         # or metric uses the spread (they cost ~n_members backward passes)
+  #   chunk_size: null      # members per batch for the per-member forces (lowers memory)
 
   n_radial: 12
   n_radial_tensor: 4
@@ -90,6 +93,19 @@ loss:
 # - name: hessian
 #   loss_type: mw_hessian # Mass-weighted Hessian loss (recommended)
 #   weight: 0.01 # Low weight recommended to avoid destabilizing forces
+# Probabilistic losses (shallow ensembles): nll, crps (Gaussian with the ensemble
+# std; parameters: {eps: sigma floor}), nll_3x3 (per-atom 3x3 force covariance;
+# parameters: {rel_jitter, abs_jitter}), crps_ensemble (fair CRPS of the members).
+
+# Optional: the loss above only every `every` steps/epochs, cheap_loss otherwise
+# loss_schedule:
+#   every: 4
+#   unit: steps  # or epochs
+#   cheap_loss:
+#   - name: energy
+#     loss_type: nll
+#   - name: forces
+#     loss_type: mse
 
 metrics:
 - name: energy
@@ -102,6 +118,8 @@ metrics:
 # - name: hessian
 #   reductions:
 #   - mae
+# Uncertainty metrics (ensembles): nll, rll (relative log-likelihood, %),
+# rll_cal (after the optimal rescaling of sigma), calib_alpha (that factor)
 
 optimizer:
   name: adam
@@ -124,6 +142,9 @@ transfer_learning:
   base_model_checkpoint: null
   reset_layers: []
   freeze_layers: []
+  # single model -> shallow ensemble: members start as copies of the output layer
+  # plus Gaussian noise of this many times its RMS
+  ensemble_init_noise: 0.1
 
 progress_bar:
   disable_epoch_pbar: false

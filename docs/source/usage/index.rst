@@ -5,3 +5,5 @@ Usage Guides
    :maxdepth: 2
 
    property_prediction
+   uncertainty
+   gpu_performance

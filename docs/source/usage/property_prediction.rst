@@ -1,5 +1,5 @@
 Property Prediction and Inference
-================================
+=================================
 
 Apax allows for flexible property prediction during inference, which can be independent of the model's training configuration.
 This is particularly useful for tasks like vibrational analysis (requiring Hessians) or stress tensor calculations for periodic systems.
@@ -101,7 +101,7 @@ Available Overrides
 
 *   ``calc_stress``: Boolean. Enables/disables stress tensor calculation.
 *   ``calc_hessian``: Boolean. Enables/disables Hessian matrix calculation.
-*   ``force_variance``: Boolean. For shallow ensembles, enables/disables force uncertainty prediction.
+*   ``force_variance``: Boolean. For shallow ensembles, enables/disables the per-member forces (and stresses), i.e. ``forces_uncertainty``, ``forces_ensemble`` and, with stress, ``stress_uncertainty`` and ``stress_ensemble``. Defaults to the training config's value, or ``True`` if that is unset. Costs one backward pass per member.
 
 Molecular Dynamics (JaxMD)
 --------------------------
