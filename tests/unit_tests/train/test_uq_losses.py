@@ -119,3 +119,16 @@ def test_crps_ensemble():
         {"x": jnp.array([yy])}, {"x": jnp.array([mu]), "x_uncertainty": jnp.array([sig])}, "x"
     )
     np.testing.assert_allclose(float(jnp.mean(fair)), float(gauss[0]), rtol=0.02)
+
+
+@pytest.mark.parametrize("beta", [0.0, 0.5, 1.0])
+def test_beta_nll_mean_gradient(beta):
+    """d/dmu of beta-NLL = (mu - y) / sigma^(2 - 2 beta); beta = 1 is the MSE gradient."""
+    mu, sig, y = 0.3, 0.2, -0.1
+
+    def f(m):
+        pred = {"x": jnp.array([m]), "x_uncertainty": jnp.array([sig])}
+        return nll_loss({"x": jnp.array([y])}, pred, "x", {"beta": beta}).sum()
+
+    var = sig**2 + 1e-12
+    np.testing.assert_allclose(jax.grad(f)(mu), (mu - y) / var ** (1 - beta), rtol=1e-6)

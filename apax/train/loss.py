@@ -106,7 +106,11 @@ def nll_loss(
     inputs: dict = {},
 ) -> jax.Array:
     """Computes the gaussian NLL loss given
-    means, targets and standard deviations (uncertainty estimate)
+    means, targets and standard deviations (uncertainty estimate).
+
+    parameters["beta"] (default 0): beta-NLL (Seitzer et al., ICLR 2022), each point's NLL
+    weighted by stop_gradient(sigma^(2 beta)). beta = 1 gives the mean exactly the MSE
+    gradient (no down-weighting of uncertain points); 0.5 weights by 1/sigma.
     """
     label = label[name]
     means = prediction[name]
@@ -116,6 +120,9 @@ def nll_loss(
     x2 = ((means - label) ** 2) / variances
     nll = 0.5 * (x1 + x2)
 
+    beta = parameters.get("beta", 0.0)
+    if beta:
+        nll = nll * jax.lax.stop_gradient(variances**beta)
     return nll
 
 
