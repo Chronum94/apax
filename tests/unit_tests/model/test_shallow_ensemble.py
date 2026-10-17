@@ -92,3 +92,27 @@ def test_shallow_ensemble_mean_only():
         np.testing.assert_allclose(pred["forces"], f_ens.mean(0), atol=1e-12)
         np.testing.assert_allclose(pred["stress"], s_ens.mean(0), atol=1e-12)
         assert "forces_uncertainty" not in pred
+
+
+def test_chunked_training_gradient_matches():
+    """Parameter gradient of a force-spread loss with and without chunking."""
+    atoms = bulk("NaCl", "rocksalt", a=5.64).repeat(2)
+    atoms.rattle(0.05, seed=2)
+    with jax.enable_x64(True):
+        R, Z, idx, box, off = _inputs(atoms)
+        grads = []
+        for chunk_size in (None, 3):
+            model = _builder(chunk_size=chunk_size).build_energy_derivative_model(
+                init_box=box
+            )
+            params = model.init(jax.random.PRNGKey(0), R, Z, idx, box, off)
+
+            def loss(p):
+                pred = model.apply(p, R, Z, idx, box, off)
+                return jnp.sum(pred["forces_uncertainty"] ** 2) + jnp.sum(
+                    pred["stress_uncertainty"] ** 2
+                )
+
+            grads.append(jax.grad(loss)(params))
+        for a, b in zip(jax.tree.leaves(grads[0]), jax.tree.leaves(grads[1])):
+            np.testing.assert_allclose(a, b, rtol=1e-9, atol=1e-14)

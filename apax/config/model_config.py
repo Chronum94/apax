@@ -90,7 +90,8 @@ class ShallowEnsembleConfig(BaseModel, extra="forbid"):
         just a metric does); at inference, always.
     chunk_size : Optional[int], default = None
         If set to an integer, the per-member forces are computed in batches of that many
-        members (`lax.map`). This lowers peak memory for large ensembles at some cost in speed.
+        members (`lax.map`, rematerialised in the backward pass). This lowers peak memory
+        for large ensembles, in training too, at some cost in speed.
 
     Hint
     ----------

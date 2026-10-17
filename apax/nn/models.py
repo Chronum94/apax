@@ -230,7 +230,11 @@ class ShallowEnsembleModel(nn.Module):
             n_ens = energy_ens.shape[0]
             cotangents = jnp.eye(n_ens, dtype=energy_ens.dtype)
             if self.chunk_size:
-                dE_dR, dE_dF = jax.lax.map(vjp_fn, cotangents, batch_size=self.chunk_size)
+                # checkpoint: differentiating through the map (training) would otherwise
+                # keep every chunk's intermediates, i.e. the memory of all members at once
+                dE_dR, dE_dF = jax.lax.map(
+                    jax.checkpoint(vjp_fn), cotangents, batch_size=self.chunk_size
+                )
             else:
                 dE_dR, dE_dF = jax.vmap(vjp_fn)(cotangents)
             forces_ens = -dE_dR  # n_members x n_atoms x 3
