@@ -253,18 +253,23 @@ def fit_pair_envelope(atoms_list, shift, r_max=5.0, ridge=1e-2):
     X, y = np.zeros((len(atoms_list), n_species)), np.zeros(len(atoms_list))
     for f, a in enumerate(atoms_list):
         i, j, d = neighbor_list("ijd", a, r_max)
-        w = 0.25 * (1.0 + np.cos(np.pi * d / r_max)) / len(a)  # 0.5 (pair double count) x 0.5 (X_ij average)
+        # 0.5 (each pair twice) x 0.5 (X_ij average) x 0.5 (cosine envelope), as in PairEnvelope
+        w = 0.125 * (1.0 + np.cos(np.pi * d / r_max)) / len(a)
         np.add.at(X[f], a.numbers[i], -w)
         np.add.at(X[f], a.numbers[j], -w)
         y[f] = (a.get_potential_energy() - shift[a.numbers].sum()) / len(a)
-    s = X.sum(1)
-    x_global = float(s @ y / (s @ s))
+    x_global = float(np.linalg.lstsq(X.sum(1, keepdims=True), y, rcond=None)[0][0])
     seen = np.abs(X).sum(0) > 0
-    G = X[:, seen].T @ X[:, seen]
-    lam = ridge * np.trace(G) / len(G)
-    coef = np.linalg.solve(G + lam * np.eye(len(G)), X[:, seen].T @ y + lam * x_global)  # shrink toward global
+    if not seen.any():  # no pairs within r_max anywhere (isolated atoms): nothing to fit
+        return np.zeros(n_species)
+    Xs = X[:, seen]
+    k = Xs.shape[1]
+    # ridge toward the global amplitude, posed as an augmented least-squares problem
+    sqrt_lam = np.sqrt(ridge * (Xs**2).sum() / k)
+    A = np.vstack([Xs, sqrt_lam * np.eye(k)])
+    b = np.concatenate([y, np.full(k, sqrt_lam * x_global)])
     amp = np.full(n_species, x_global)
-    amp[seen] = coef
+    amp[seen] = np.linalg.lstsq(A, b, rcond=None)[0]
     return amp
 
 
