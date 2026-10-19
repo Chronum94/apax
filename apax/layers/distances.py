@@ -1,18 +1,18 @@
 import jax.numpy as jnp
 import numpy as np
 from jax import vmap
-from jax_md import partition, space
+
+from apax.utils.space import raw_transform, transform
 
 
 def canonicalize_neighbors(neighbor):
-    return neighbor.idx if isinstance(neighbor, partition.NeighborList) else neighbor
+    return getattr(neighbor, "idx", neighbor)
 
 
 def disp_fn(ri, rj, perturbation, box):
     # `perturbation` is accepted for signature compatibility but applied in
     # `compute_distances`, after the periodic-image offsets are added.
-    dR = space.pairwise_displacement(ri, rj)
-    dR = space.transform(box, dR)
+    dR = transform(box, ri - rj)
     return dR
 
 
@@ -30,8 +30,9 @@ def make_distance_fn(init_box, inference_disp_fn=None, geometry_dtype=jnp.float6
 
     if np.all(init_box < 1e-6):
         # gas phase training and predicting
-        displacement_fn = space.free()[0]
-        displacement = space.map_bond(displacement_fn)
+        def displacement(Ra, Rb):
+            return Ra - Rb
+
     elif inference_disp_fn is None:
         # for training on periodic systems
         displacement = vmap(disp_fn, (0, 0, None, None), 0)
@@ -72,7 +73,7 @@ def make_distance_fn(init_box, inference_disp_fn=None, geometry_dtype=jnp.float6
             if perturbation is not None:
                 # homogeneous deformation F = I + strain of the full pair vector,
                 # periodic-image shift included (jax_md convention: F replaces dR)
-                dr_vec = space.raw_transform(perturbation, dr_vec)
+                dr_vec = raw_transform(perturbation, dr_vec)
         return dr_vec, idx
 
     return compute_distances

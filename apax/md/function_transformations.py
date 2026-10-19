@@ -2,7 +2,8 @@ import dataclasses
 
 import jax
 import jax.numpy as jnp
-from jax_md import quantity
+
+from apax.utils.space import volume
 
 
 def make_biased_energy_force_fn(bias_fn):
@@ -145,7 +146,7 @@ class ProcessStress:
         def corrected_model(positions, Z, idx, box, offsets):
             results = model(positions, Z, idx, box, offsets)
 
-            V = quantity.volume(3, box)
+            V = volume(box)
             results = {
                 # We should properly check whether CP2K uses the ASE cell convention
                 # for tetragonal strain, it doesn't matter whether we transpose or not

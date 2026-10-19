@@ -2,8 +2,9 @@ from typing import Any, Callable, Union
 
 import jax
 import jax.numpy as jnp
-from jax_md.space import distance
 from pydantic import BaseModel, TypeAdapter
+
+from apax.utils.space import distance
 
 
 class BiasEnergyBase(BaseModel):

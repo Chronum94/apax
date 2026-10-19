@@ -171,6 +171,23 @@ class NVTOptions(NVEOptions, extra="forbid"):
     thermostat_chain: NHCOptions = NHCOptions()
 
 
+class LangevinOptions(Integrator, extra="forbid"):
+    """
+    Options for NVT simulations with the BAOAB Langevin integrator.
+
+    Parameters
+    ----------
+    name : Literal["langevin"]
+        Name of the ensemble.
+    friction : PositiveFloat, default = 0.01
+        Friction coefficient gamma in 1/fs.
+        The velocity autocorrelation decays on a timescale of 1/gamma.
+    """
+
+    name: Literal["langevin"]
+    friction: PositiveFloat = 0.01  # 1/fs
+
+
 class NPTOptions(NVTOptions, extra="forbid"):
     """
     Options for NPT ensemble simulations.
@@ -356,7 +373,7 @@ class MDConfig(BaseModel, frozen=True, extra="forbid"):
     seed: int = 1
 
     # https://docs.pydantic.dev/latest/usage/types/unions/#discriminated-unions-aka-tagged-unions
-    ensemble: Union[NVEOptions, NVTOptions, NPTOptions] = Field(
+    ensemble: Union[NVEOptions, NVTOptions, LangevinOptions, NPTOptions] = Field(
         NVTOptions(name="nvt"), discriminator="name"
     )
 

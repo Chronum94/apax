@@ -4,7 +4,12 @@ import pytest
 from ase import units
 from jax_md import space
 
-from apax.config.md_config import NPTOptions, NVEOptions, NVTOptions
+from apax.config.md_config import (
+    LangevinOptions,
+    NPTOptions,
+    NVEOptions,
+    NVTOptions,
+)
 from apax.md.sim_utils import SimulationFunctions
 from apax.md.simulate import get_ensemble
 
@@ -60,6 +65,42 @@ def test_nvt_removes_constrained_dof():
     assert state.chain.degrees_of_freedom == 3 * N_ATOMS - 3
     state = apply_fn(state)
     assert state.chain.degrees_of_freedom == 3 * N_ATOMS - 3
+
+
+def test_langevin_samples_target_temperature():
+    ensemble = LangevinOptions(
+        name="langevin", dt=1.0, temperature_schedule=TEMPERATURE, friction=0.05
+    )
+    state, apply_fn = init_state(ensemble)
+    # harmonic wells with unit mass: period ~64 fs in ASE time units
+    n_steps = 20_000
+
+    def body(state, _):
+        state = apply_fn(state)
+        ke = 0.5 * jnp.sum(state.momentum**2 / state.mass)
+        return state, ke
+
+    _, ke = jax.lax.scan(body, state, None, length=n_steps)
+    temperature = 2 * jnp.mean(ke[n_steps // 10 :]) / (3 * N_ATOMS) / units.kB
+    assert abs(temperature - 300) < 30
+
+
+def test_langevin_keeps_fixed_atoms_in_place():
+    ensemble = LangevinOptions(name="langevin", dt=1.0, temperature_schedule=TEMPERATURE)
+
+    def fix_first_atom(state):
+        return state.set(
+            momentum=state.momentum.at[0].set(0.0), force=state.force.at[0].set(0.0)
+        )
+
+    init_fn, apply_fn, _, _ = get_ensemble(ensemble, make_sim_fns(), 0, fix_first_atom)
+    R = jax.random.normal(jax.random.PRNGKey(0), (N_ATOMS, 3))
+    state = fix_first_atom(init_fn(jax.random.PRNGKey(1), R, mass=jnp.ones(N_ATOMS)))
+
+    state = fix_first_atom(apply_fn(state))
+
+    assert jnp.allclose(state.position[0], R[0])
+    assert not jnp.allclose(state.position[1:], R[1:])
 
 
 def test_npt_rejects_constraints():

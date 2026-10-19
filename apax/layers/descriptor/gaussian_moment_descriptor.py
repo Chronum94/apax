@@ -5,13 +5,13 @@ import flax.linen as nn
 import jax
 import jax.numpy as jnp
 from jax import vmap
-from jax_md import space
 
 from apax.layers.descriptor.basis_functions import RadialFunction
 from apax.layers.descriptor.moments import geometric_moments, geometric_moments_packed
 from apax.layers.descriptor.triangular_indices import tril_2d_indices, tril_3d_indices
 from apax.layers.masking import mask_by_neighbor
 from apax.utils.convert import str_to_dtype
+from apax.utils.space import distance
 
 
 class GaussianMomentDescriptor(nn.Module):
@@ -27,7 +27,7 @@ class GaussianMomentDescriptor(nn.Module):
         self.r_max = self.radial_fn.r_max
         self.n_radial = self.radial_fn._n_radial
 
-        self.distance = vmap(space.distance, 0, 0)
+        self.distance = vmap(distance, 0, 0)
 
         n_tensor = self.n_radial_tensor or self.n_radial
         if self.n_radial_tensor:

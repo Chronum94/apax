@@ -34,6 +34,7 @@ from apax.train.checkpoints import (
     restore_parameters,
 )
 from apax.train.run import setup_logging
+from apax.utils.space import perpendicular_widths
 
 log = logging.getLogger(__name__)
 
@@ -80,18 +81,18 @@ def create_energy_fn(
     return energy_fn
 
 
-def heights_of_box_sides(box):
-    heights = []
-
-    for i in range(len(box)):
-        for j in range(i + 1, len(box)):
-            area = np.linalg.norm(np.cross(box[i], box[j]))
-            height = area / np.linalg.norm(box[i])
-            heights.append(height)
-            height = area / np.linalg.norm(box[j])
-            heights.append(height)
-
-    return np.array(heights)
+def check_minimum_image(box, r_max):
+    """jax_md's periodic displacement uses the minimum image convention,
+    which only finds every neighbor if the cutoff is below half of each
+    perpendicular cell width.
+    """
+    half_width = np.min(perpendicular_widths(box)) / 2
+    if r_max >= half_width:
+        raise ValueError(
+            f"Cutoff radius {r_max} is not smaller than half the smallest perpendicular "
+            f"cell width ({half_width:.3f}). jax_md's minimum image convention would "
+            "miss neighbors; use a larger supercell."
+        )
 
 
 def nbr_update_options_default(state):
@@ -124,7 +125,32 @@ def remove_constrained_dof(init_fn, n_constrained_dof):
     return wrapped_init_fn
 
 
-def get_ensemble(ensemble: Integrator, sim_fns, n_constrained_dof=0):
+def nvt_langevin_baoab(energy_fn, shift_fn, dt, kT, gamma, constrain_fn):
+    """BAOAB Langevin built from jax_md's primitives.
+    `jax_md.simulate.nvt_langevin` gives the O-step noise to constrained atoms,
+    which then move in the second A step before the force call. Applying the
+    constraints right after O keeps them in place.
+    """
+    init_fn, _ = simulate.nvt_langevin(energy_fn, shift_fn, dt, kT, gamma=gamma)
+    force_fn = quantity.canonicalize_force(energy_fn)
+
+    def apply_fn(state, **kwargs):
+        _kT = kwargs.pop("kT", kT)
+        dt_2 = dt / 2
+        state = simulate.momentum_step(state, dt_2)
+        state = simulate.position_step(state, shift_fn, dt_2, **kwargs)
+        state = simulate.stochastic_step(state, dt, _kT, gamma)
+        state = constrain_fn(state)
+        state = simulate.position_step(state, shift_fn, dt_2, **kwargs)
+        state = state.set(force=force_fn(state.position, **kwargs))
+        return simulate.momentum_step(state, dt_2)
+
+    return init_fn, apply_fn
+
+
+def get_ensemble(
+    ensemble: Integrator, sim_fns, n_constrained_dof=0, constrain_fn=lambda state: state
+):
     energy, shift = sim_fns.energy_fn, sim_fns.shift_fn
 
     dt = ensemble.dt * units.fs
@@ -144,6 +170,13 @@ def get_ensemble(ensemble: Integrator, sim_fns, n_constrained_dof=0):
             dt,
             kT(0),
             **thermostat_chain,
+        )
+        if n_constrained_dof:
+            init_fn = remove_constrained_dof(init_fn, n_constrained_dof)
+
+    elif ensemble.name == "langevin":
+        init_fn, apply_fn = nvt_langevin_baoab(
+            energy, shift, dt, kT(0), ensemble.friction / units.fs, constrain_fn
         )
         if n_constrained_dof:
             init_fn = remove_constrained_dof(init_fn, n_constrained_dof)
@@ -171,7 +204,7 @@ def get_ensemble(ensemble: Integrator, sim_fns, n_constrained_dof=0):
         nbr_options = nbr_update_options_npt
     else:
         raise NotImplementedError(
-            "Only the NVE and Nose Hoover NVT/NPT thermostats are currently interfaced."
+            "Only NVE, Langevin NVT and Nose Hoover NVT/NPT are currently interfaced."
         )
 
     return init_fn, apply_fn, kT, nbr_options
@@ -337,7 +370,7 @@ def run_sim(
     n_constrained_dof = 3 * len(constrained_idxs)
     n_dof = system.positions.size - n_constrained_dof
     init_fn, apply_fn, kT, nbr_options = get_ensemble(
-        ensemble, sim_fns, n_constrained_dof
+        ensemble, sim_fns, n_constrained_dof, apply_constraints
     )
 
     neighbor = sim_fns.neighbor_fn.allocate(
@@ -368,6 +401,7 @@ def run_sim(
         truncate_trajectory_to_checkpoint(traj_handler.traj_path, length)
 
     initial_step = step  # used for measuring time correctly
+    is_npt = isinstance(state, simulate.NPTNoseHooverState)
 
     n_outer = int(np.ceil(n_steps / n_inner))
     pbar_update_freq = int(np.ceil(500 / n_inner))
@@ -467,6 +501,8 @@ def run_sim(
 
             state = new_state
             step += 1
+            if is_npt and sim_fns.r_max is not None:
+                check_minimum_image(simulate.npt_box(state), sim_fns.r_max)
             maybe_save_checkpoint(
                 mngr, state, step, checkpoint_interval, sim_time_per_step
             )
@@ -542,18 +578,7 @@ def md_setup(model_config: Config, md_config: MDConfig):
         displacement_fn, shift_fn = space.free()
     else:
         frac_coords = True
-        heights = heights_of_box_sides(system.box)
-
-        if np.any(atoms.cell.lengths() / 2 < r_max):
-            log.error(
-                f"Cutoff radius is larger than half the box in at least one cell vector direction: "
-                f"{r_max} > {np.min(atoms.cell.lengths()) / 2}. Cannot calculate correct neighbors."
-            )
-        if np.any(heights / 2 < r_max):
-            log.error(
-                f"Cutoff radius is larger than half the box in at least one cell vector direction: "
-                f"{r_max} > {np.min(heights) / 2}. Cannot calculate correct neighbors."
-            )
+        check_minimum_image(system.box, r_max)
 
         displacement_fn, shift_fn = space.periodic_general(
             system.box,
@@ -635,7 +660,7 @@ def md_setup(model_config: Config, md_config: MDConfig):
         energy_fn = apply_bias_energy(bias, energy_fn)
         auxiliary_fn = apply_bias_auxiliary(bias, auxiliary_fn)
 
-    sim_fns = SimulationFunctions(energy_fn, auxiliary_fn, shift_fn, neighbor_fn)
+    sim_fns = SimulationFunctions(energy_fn, auxiliary_fn, shift_fn, neighbor_fn, r_max)
     return system, sim_fns
 
 

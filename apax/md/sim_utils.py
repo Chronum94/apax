@@ -3,7 +3,8 @@ from typing import Callable, Optional
 
 import jax.numpy as jnp
 import numpy as np
-from jax_md import space
+
+from apax.utils.space import transform
 
 
 @dataclasses.dataclass
@@ -24,7 +25,7 @@ class System:
         box = box.T
         positions = jnp.asarray(atoms.positions, dtype=jnp.float64)
         if np.any(box > 1e-6):
-            positions = space.transform(jnp.linalg.inv(box), positions)
+            positions = transform(jnp.linalg.inv(box), positions)
 
         system = cls(
             atomic_numbers=atomic_numbers,
@@ -43,3 +44,4 @@ class SimulationFunctions:
     auxiliary_fn: Callable
     shift_fn: Callable
     neighbor_fn: Callable
+    r_max: Optional[float] = None
