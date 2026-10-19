@@ -220,11 +220,6 @@ def test_ase_energy_matches_explicit_images(make, rep):
     np.testing.assert_allclose(e_ase, e_offsets, rtol=1e-10, atol=1e-12)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="ASECalculator keeps the neighbour list of the first cell when only the cell changes "
-    "(same atoms, jax_md path both times) and misses pairs",
-)
 def test_ase_calculator_reused_across_cells():
     first = _SKEWED(5)  # 500 atoms
     first.rattle(0.05, seed=1)
