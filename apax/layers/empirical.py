@@ -189,7 +189,7 @@ class NLHRepulsion(EmpiricalEnergyTerm):
 
     def setup(self):
         dtype = str_to_dtype(self.dtype)
-        self.distance = vmap(space.distance, 0, 0)
+        self.distance = vmap(distance, 0, 0)
         self._a = jnp.asarray(self.a, dtype=dtype)  # inject at module dtype (fp32)
         self._b = jnp.asarray(self.b, dtype=dtype)
 
@@ -227,7 +227,7 @@ class PairEnvelope(EmpiricalEnergyTerm):
 
     def setup(self):
         dtype = str_to_dtype(self.dtype)
-        self.distance = vmap(space.distance, 0, 0)
+        self.distance = vmap(distance, 0, 0)
         n_species = len(data.covalent_radii)
         init = (lambda *_: jnp.asarray(self.amp_init, dtype)) if self.amp_init is not None else nn.initializers.zeros
         self.amp = self.param("envelope_amp" if self.trainable else "envelope_amp_frozen", init, (n_species,), dtype)
