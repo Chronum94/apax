@@ -534,6 +534,10 @@ class Config(BaseModel, frozen=True, extra="forbid"):
         | Set to false to force single device training.
     ckpt_interval: int
         | Number of epochs between checkpoints.
+    scan_epoch : bool, default = False
+        | Keep the training set on the device and run each epoch as one compiled
+        | `lax.scan` (one dispatch per epoch instead of one per step). Needs
+        | `processing: cached`, one device and no `loss_schedule`; otherwise ignored.
     """
 
     n_epochs: PositiveInt
@@ -542,6 +546,7 @@ class Config(BaseModel, frozen=True, extra="forbid"):
     seed: int = 1
     data_parallel: bool = True
     ckpt_interval: PositiveInt = 500
+    scan_epoch: bool = False
 
     data: DataConfig
     model: ModelConfig = Field(GMNNConfig(name="gmnn"), discriminator="name")

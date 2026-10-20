@@ -15,7 +15,7 @@ from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 from tqdm import trange
 
-from apax.data.input_pipeline import InMemoryDataset
+from apax.data.input_pipeline import CachedInMemoryDataset, InMemoryDataset
 from apax.train.checkpoints import load_state
 from apax.train.parameters import EMAParameters
 
@@ -46,6 +46,8 @@ def fit(
     val_Metrics: Optional[metrics.Collection] = None,
     val_model: Optional[Callable] = None,
     cheap_step: Optional[dict] = None,
+    scan_epoch: bool = False,
+    seed: int = 0,
 ):
     """
     Trains the model using the provided training dataset.
@@ -88,6 +90,11 @@ def fit(
     cheap_step : dict, default = None
         `loss_fn`, `model`, `every` and `unit` ("steps"/"epochs"): use `loss_fn` with
         `model` except on every `every`-th step (or epoch), which uses the main loss.
+    scan_epoch : bool, default = False
+        Keep the training set on the device and run each epoch as one `lax.scan`
+        (cached datasets, one device, no `cheap_step`; otherwise the step loop is used).
+    seed : int, default = 0
+        Seed of the per-epoch shuffle of the scanned epoch.
     """
     if val_Metrics is None:
         val_Metrics = Metrics
@@ -125,6 +132,9 @@ def fit(
         return (epoch * train_steps_per_epoch + batch_idx) % cheap_step["every"] == 0
 
     state, start_epoch = load_state(state, latest_dir, ema_handler)
+    # a fresh TrainState counts steps with a Python int; the first update returns an array,
+    # which would retrace and compile the step (or epoch) function a second time
+    state = state.replace(step=jnp.asarray(state.step, dtype=jax.dtypes.canonicalize_dtype(jnp.int64)))
     if start_epoch >= n_epochs:
         print(
             f"Training has already completed ({start_epoch} >= {n_epochs}). Nothing to be done"
@@ -141,7 +151,31 @@ def fit(
         mesh = None
 
     train_steps_per_epoch = train_ds.steps_per_epoch()
-    batch_train_ds = train_ds.shuffle_and_batch(mesh)
+    scan = (
+        scan_epoch
+        and mesh is None
+        and not cheap_step
+        and isinstance(train_ds, CachedInMemoryDataset)
+    )
+    if scan_epoch and not scan:
+        log.warning(
+            "scan_epoch needs a cached dataset, one device and no loss_schedule; using the step loop"
+        )
+    if scan:
+        train_data = train_ds.device_arrays()
+        epoch_fn = make_scan_epoch(
+            train_step,
+            ema_handler.decay if ema_handler else None,
+            train_steps_per_epoch,
+            train_ds.batch_size,
+        )
+        shuffle_key = jax.random.PRNGKey(seed)
+        ema_params = None
+        if ema_handler:  # a copy: the scan donates `state`, which load_state may alias
+            src = ema_handler.ema_params if ema_handler.ema_params is not None else state.params
+            ema_params = tree_util.tree_map(jnp.copy, src)
+    else:
+        batch_train_ds = train_ds.shuffle_and_batch(mesh)
 
     if val_ds is not None:
         val_steps_per_epoch = val_ds.steps_per_epoch()
@@ -180,7 +214,20 @@ def fit(
                     leave=False,
                 )
 
-                for batch_idx in range(train_steps_per_epoch):
+                if scan:
+                    state, ema_params, train_batch_metrics, loss_sum = epoch_fn(
+                        state,
+                        ema_params,
+                        train_batch_metrics,
+                        train_data,
+                        jax.random.fold_in(shuffle_key, epoch),
+                        bool(ema_handler) and epoch >= ema_handler.ema_start,
+                    )
+                    if ema_handler:
+                        ema_handler.ema_params = ema_params
+                    loss_sums["main"] = [loss_sum, train_steps_per_epoch]
+
+                for batch_idx in range(0 if scan else train_steps_per_epoch):
                     callbacks.on_train_batch_begin(batch=batch_idx)
 
                     batch = next(batch_train_ds)
@@ -338,6 +385,43 @@ def make_ensemble_eval(update_fn: Callable) -> Callable:
         return mean_loss, mean_predictions
 
     return ensemble_eval_fn
+
+
+def make_scan_epoch(train_step, ema_decay, steps, batch_size):
+    """One compiled call per epoch: `lax.scan` of `train_step` over a device-resident dataset.
+
+    Each epoch draws a fresh permutation (the remainder of n_data / batch_size is dropped, as in
+    the step loop). The weight average is carried through the scan with the step loop's rule:
+    it follows the raw parameters until `ema_active`, then decays per step.
+    """
+
+    @partial(jax.jit, donate_argnums=(0, 1))
+    def epoch_fn(state, ema_params, batch_metrics, data, key, ema_active):
+        n_data = tree_util.tree_leaves(data)[0].shape[0]
+        perm = jax.random.permutation(key, n_data)[: steps * batch_size]
+
+        def body(carry, idx):
+            state, ema, batch_metrics, loss_sum = carry
+            batch = tree_util.tree_map(lambda x: x[idx], data)
+            (state, batch_metrics), loss = train_step((state, batch_metrics), batch)
+            if ema is not None:
+                ema = tree_util.tree_map(
+                    lambda n, a: jnp.where(ema_active, ema_decay * a + (1 - ema_decay) * n, n),
+                    state.params,
+                    ema,
+                )
+            loss_sum = loss_sum + jnp.mean(loss).astype(loss_sum.dtype)
+            return (state, ema, batch_metrics, loss_sum), None
+
+        perm = perm.reshape(steps, batch_size)
+        carry = (state, ema_params, batch_metrics, jnp.zeros(()))
+        # Metrics.empty() is 32-bit and the first merge promotes it: start the carry at the step's output types
+        out = jax.eval_shape(body, carry, perm[0])[0]
+        carry = tree_util.tree_map(lambda x, o: jnp.asarray(x, o.dtype), carry, out)
+        (state, ema_params, batch_metrics, loss_sum), _ = jax.lax.scan(body, carry, perm)
+        return state, ema_params, batch_metrics, loss_sum
+
+    return epoch_fn
 
 
 def make_step_fns(

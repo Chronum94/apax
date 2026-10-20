@@ -252,6 +252,13 @@ class InMemoryDataset:
         inputs = tree_util.tree_map(lambda x: jnp.array(x), inputs)
         return inputs, np.array(box)
 
+    def device_arrays(self):
+        """Every padded sample stacked into device arrays (inputs, labels), for the scanned epoch."""
+        samples = [self.prepare_data(i) for i in range(self.n_data)]
+        return tree_util.tree_map(
+            lambda *x: jnp.asarray(np.stack([np.asarray(v) for v in x])), *samples
+        )
+
     def __iter__(self):
         raise NotImplementedError
 
@@ -330,7 +337,7 @@ class CachedInMemoryDataset(InMemoryDataset):
             p.unlink()
 
         index_file = self.file.parent / f"{self.file.name}.index"
-        index_file.unlink()
+        index_file.unlink(missing_ok=True)  # never written when the epoch is scanned
 
 
 class OTFInMemoryDataset(InMemoryDataset):

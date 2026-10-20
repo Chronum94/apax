@@ -345,5 +345,7 @@ def run(user_config: Union[str, os.PathLike, dict], log_level="error"):
         val_Metrics=val_Metrics,
         val_model=val_model,
         cheap_step=cheap_step,
+        scan_epoch=config.scan_epoch,
+        seed=config.seed,
     )
     log.info("Finished training")
