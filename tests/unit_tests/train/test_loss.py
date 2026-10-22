@@ -6,6 +6,7 @@ from apax.train.loss import (
     force_angle_div_force_label,
     force_angle_exponential_weight,
     force_angle_loss,
+    pairwise_squared_error,
     weighted_squared_error,
 )
 
@@ -133,3 +134,16 @@ def test_force_loss():
     loss = loss_func(inputs=inputs, label=label, prediction=pred)
     ref_loss = 0.25
     assert abs(loss - ref_loss) < 1e-6
+
+
+def test_pairwise_squared_error():
+    rng = np.random.default_rng(0)
+    n_atoms = jnp.array(rng.integers(5, 20, 6), dtype=jnp.float32)
+    label = {"energy": jnp.array(rng.normal(size=6))}
+    pred = {"energy": jnp.array(rng.normal(size=6))}
+    loss = pairwise_squared_error(label, pred, "energy", inputs={"n_atoms": n_atoms})
+    d = (pred["energy"] - label["energy"]) / n_atoms
+    brute = np.mean([(d[i] - d[j]) ** 2 for i in range(6) for j in range(i + 1, 6)])
+    assert np.allclose(jnp.mean(loss), brute, rtol=1e-5)
+    shifted = {"energy": pred["energy"] + 3.0 * n_atoms}  # common per-atom offset
+    assert np.allclose(pairwise_squared_error(label, shifted, "energy", inputs={"n_atoms": n_atoms}), loss, atol=1e-5)

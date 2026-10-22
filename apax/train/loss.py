@@ -45,6 +45,22 @@ def weighted_huber_loss(
     return loss
 
 
+def pairwise_squared_error(
+    label: jnp.array,
+    prediction: jnp.array,
+    name: str,
+    parameters: dict = {},
+    inputs: dict = {},
+) -> jnp.array:
+    """Squared error of within-batch differences of the per-atom error d_i = (pred_i - label_i) / n_atoms_i,
+    averaged over all pairs (i, j) of the batch: mean_{i<j} (d_i - d_j)^2. Returned per structure as
+    2N/(N-1) * (d_i - mean d)^2, whose batch mean equals the all-pairs mean. A batch-common error offset is
+    invisible to it, so it weights relative energies within a batch. Use with atoms_exponent 0."""
+    d = (prediction[name] - label[name]) / inputs["n_atoms"]
+    n = d.shape[0]
+    return 2.0 * n / max(n - 1, 1) * (d - jnp.mean(d)) ** 2
+
+
 def _floored_sigma(sigmas, parameters):
     """sqrt(sigma^2 + eps^2): a smooth floor (default eps 1e-6, in the units of the
     quantity). A hard clip has zero gradient below the floor."""
@@ -282,6 +298,7 @@ nll_3x3.uses_spread = True
 loss_functions = {
     "mse": weighted_squared_error,
     "huber": weighted_huber_loss,
+    "pairwise_mse": pairwise_squared_error,
     "cosine_sim": force_angle_loss,
     "cosine_sim_div_magnitude": force_angle_div_force_label,
     "cosine_sim_exp_magnitude": force_angle_exponential_weight,
