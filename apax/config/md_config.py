@@ -368,6 +368,10 @@ class MDConfig(BaseModel, frozen=True, extra="forbid"):
         | These will be loaded with the `restart` option.
     disable_pbar : bool, False
         | Disables the MD progressbar.
+    tabulate_radial : bool, default = False
+        | Evaluate the radial function from per element pair coefficient tables built at
+        | start-up for the elements of the system (exact; inference only, see
+        | `apax/layers/descriptor/radial_table.py`). Needs an identity radial transform.
     """
 
     seed: int = 1
@@ -400,6 +404,7 @@ class MDConfig(BaseModel, frozen=True, extra="forbid"):
     wrapped: bool = True
     checkpoint_interval: int = 50_000
     disable_pbar: bool = False
+    tabulate_radial: bool = False
 
     def dump_config(self):
         """

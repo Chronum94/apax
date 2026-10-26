@@ -64,9 +64,12 @@ log = logging.getLogger(__name__)
 
 
 class ModelBuilder:
-    def __init__(self, model_config: ModelConfig, n_species: int = 119):
+    def __init__(self, model_config: ModelConfig, n_species: int = 119, radial_fn=None):
+        """radial_fn: an already built radial function (e.g. a TabulatedRadialFunction
+        for inference) that replaces the one described by the config."""
         self.config = model_config
         self.n_species = n_species
+        self.radial_fn = radial_fn
 
     def build_basis_function(self):
         basis_config = self.config["basis"]
@@ -104,6 +107,8 @@ class ModelBuilder:
             raise ValueError(f"unknown radial transform requested: {name}")
 
     def build_radial_function(self):
+        if self.radial_fn is not None:
+            return self.radial_fn
         basis_fn = self.build_basis_function()
         radial_transform = self.build_radial_transform()
 

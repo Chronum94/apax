@@ -16,6 +16,7 @@ from tqdm.contrib.logging import logging_redirect_tqdm
 
 from apax.config import Config, MDConfig, parse_config
 from apax.config.md_config import Integrator
+from apax.layers.descriptor.radial_table import tabulate_radial
 from apax.md.ase_calc import make_ensemble, maybe_vmap
 from apax.md.bias import (
     BiasEnergies,
@@ -34,6 +35,7 @@ from apax.train.checkpoints import (
     restore_parameters,
 )
 from apax.train.run import setup_logging
+from apax.utils.convert import str_to_dtype
 from apax.utils.space import perpendicular_widths
 
 log = logging.getLogger(__name__)
@@ -538,6 +540,28 @@ def run_sim(
     )
 
 
+def tabulated_radial(model_config: Config, params, atomic_numbers):
+    """Tabulate the trained radial function for the elements present
+    (MDConfig.tabulate_radial). Sampling uses a float64 copy of the radial on the CPU;
+    the table is evaluated in the model's descriptor dtype."""
+    model_dict = model_config.model.model_dump()
+    model_dict["descriptor_dtype"] = "fp64"
+    exact = model_config.model.get_builder()(model_dict).build_radial_function()
+    cpu = jax.devices("cpu")[0]
+    radial_params = jax.device_put(
+        params["params"]["energy_model"]["representation"]["radial_fn"], cpu
+    )
+    with jax.default_device(cpu):
+        table = tabulate_radial(
+            exact,
+            radial_params,
+            np.unique(np.asarray(atomic_numbers)).tolist(),
+            dtype=str_to_dtype(model_config.model.descriptor_dtype),
+        )
+    log.info("radial function tabulated")
+    return table
+
+
 def md_setup(model_config: Config, md_config: MDConfig):
     """
     Sets up the energy and neighborlist functions for an MD simulation,
@@ -586,8 +610,16 @@ def md_setup(model_config: Config, md_config: MDConfig):
             wrapped=md_config.wrapped,
         )
 
+    _, gradient_model_params = restore_parameters(model_config.data.model_version_path)
+    params = canonicalize_energy_model_parameters(gradient_model_params)
+
+    radial_fn = None
+    if md_config.tabulate_radial:
+        radial_fn = tabulated_radial(
+            model_config, gradient_model_params, system.atomic_numbers
+        )
     Builder = model_config.model.get_builder()
-    builder = Builder(model_config.model.model_dump())
+    builder = Builder(model_config.model.model_dump(), radial_fn=radial_fn)
     energy_model = builder.build_energy_model(
         apply_mask=True,
         init_box=np.array(system.box),
@@ -604,9 +636,6 @@ def md_setup(model_config: Config, md_config: MDConfig):
         format=partition.Sparse,
         disable_cell_list=disable_cell_list,
     )
-
-    _, gradient_model_params = restore_parameters(model_config.data.model_version_path)
-    params = canonicalize_energy_model_parameters(gradient_model_params)
 
     n_models = 1
     shallow = False
