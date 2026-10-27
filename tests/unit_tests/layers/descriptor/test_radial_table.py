@@ -13,18 +13,19 @@ R_MAX = 5.0
 ELEMENTS = (3, 9)  # Li, F
 
 
-def _config(radial_function):
+def _config(radial_function, radial_transform="identity"):
     return GMNNConfig(
         basis={"name": "bessel", "n_basis": 8, "r_max": R_MAX},
         nn=[16, 16],
         radial_function=radial_function,
+        radial_transform=radial_transform,
         descriptor_dtype="fp64",
         readout_dtype="fp64",
     )
 
 
-def _exact_radial(radial_function):
-    cfg = _config(radial_function)
+def _exact_radial(radial_function, radial_transform="identity"):
+    cfg = _config(radial_function, radial_transform)
     radial = cfg.get_builder()(cfg.model_dump()).build_radial_function()
     d = jnp.linspace(1.0, 4.0, 3)
     z = jnp.full(d.shape, ELEMENTS[0])
@@ -32,10 +33,11 @@ def _exact_radial(radial_function):
     return radial, params
 
 
+@pytest.mark.parametrize("radial_transform", ["identity", "covalent"])
 @pytest.mark.parametrize("radial_function", ["dense", "factorized"])
-def test_tabulated_radial_matches_exact(radial_function):
+def test_tabulated_radial_matches_exact(radial_function, radial_transform):
     with jax.enable_x64(True):
-        radial, params = _exact_radial(radial_function)
+        radial, params = _exact_radial(radial_function, radial_transform)
         table = tabulate_radial(radial, params, ELEMENTS, dtype=jnp.float64)
         # includes distances beyond the cutoff
         d = jnp.asarray(np.random.default_rng(0).uniform(0.5, R_MAX + 0.5, 4000))
@@ -56,11 +58,12 @@ def test_tabulated_radial_matches_exact(radial_function):
                 assert jnp.abs(dr_ap - dr_ex).max() < 1e-10 * jnp.abs(dr_ex).max()
 
 
-def test_tabulated_model_energy_forces():
+@pytest.mark.parametrize("radial_transform", ["identity", "covalent"])
+def test_tabulated_model_energy_forces(radial_transform):
     atoms = bulk("LiF", "rocksalt", a=4.03).repeat(2)
     atoms.rattle(0.1, seed=0)
     with jax.enable_x64(True):
-        cfg = _config("factorized")
+        cfg = _config("factorized", radial_transform)
         inp = atoms_to_inputs([atoms])
         R, Z = np.asarray(inp["positions"][0]), np.asarray(inp["numbers"][0])
         box = np.asarray(inp["box"][0])
@@ -83,11 +86,12 @@ def test_tabulated_model_energy_forces():
         np.testing.assert_allclose(approx["forces"], exact["forces"], atol=1e-7 * f_scale)
 
 
-def test_table_dtype_follows_target_not_sampler():
+@pytest.mark.parametrize("radial_transform", ["identity", "covalent"])
+def test_table_dtype_follows_target_not_sampler(radial_transform):
     """Sampling happens in float64; the table, its evaluation basis and its output must
     be in the target dtype."""
     with jax.enable_x64(True):
-        radial, params = _exact_radial("factorized")
+        radial, params = _exact_radial("factorized", radial_transform)
         table = tabulate_radial(radial, params, ELEMENTS, dtype=jnp.float32)
         d = jnp.linspace(1.0, 4.0, 5, dtype=jnp.float32)
         z = jnp.full(d.shape, ELEMENTS[0])

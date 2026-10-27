@@ -371,7 +371,7 @@ class MDConfig(BaseModel, frozen=True, extra="forbid"):
     tabulate_radial : bool, default = False
         | Evaluate the radial function from per element pair coefficient tables built at
         | start-up for the elements of the system (exact; inference only, see
-        | `apax/layers/descriptor/radial_table.py`). Needs an identity radial transform.
+        | `apax/layers/descriptor/radial_table.py`).
     """
 
     seed: int = 1
