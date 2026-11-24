@@ -176,6 +176,22 @@ E1 is **not** applied to the XLA path: there it measured 9 % slower at 3.9k (fus
 * NLH repulsion pair loop (~210 us/step at 17.9k) and the pair-cotangent `add_any` it causes; fusing NLH into the Warp
   pair kernels is the lever.
 
+## T. Tests
+
+Self-contained (synthetic rattled NaCl crystals, random radial tables; no trained model). Warp / ALCHEMI tests skip
+without a CUDA GPU or without `warp-lang` / `nvalchemi-toolkit-ops`.
+
+| test | covers | reference |
+|---|---|---|
+| `tests/unit_tests/layers/descriptor/test_warp_contract.py` | E15/E25 contraction kernels, feature order incl. `n_contr` / `drop_contractions`, backward work list, chunk rule | `GaussianMomentDescriptor._contract` in fp64 |
+| `tests/unit_tests/layers/descriptor/test_warp_moments.py` | Warp moment kernels (forward + VJP) for several splits, split heuristic | XLA fp64 moments |
+| `tests/unit_tests/layers/test_neighbor_grad.py` | CSR starts (incl. padding / empty atoms / jax-md stray slot), reverse pairs (computed and cached row), `gather_pair` VJP, E21 `pair_vectors` (cubic + triclinic) | host brute force / XLA |
+| `tests/unit_tests/md/test_alchemi_neighbor_list.py` | E12/E14/E16 adapter: identical pairs / capacity / layout vs jax-md, reverse row, rebuild criterion, sorted lists; Morton permutation and `sorted_frame` (CPU) | jax-md Sparse list |
+| `tests/unit_tests/md/test_nhc_fused.py` | fused Nose-Hoover chain incl. E23 (CPU) | `jax_md.simulate.nose_hoover_chain` |
+
+End-to-end accuracy against a full-fp64 model and NVE conservation need a trained model; they remain scripts
+(`check_fp64.py`, NVE runs) and are summarised at the top of this document.
+
 ## E2. Memory (peak GPU memory of the MD process, L40S 46 GB, current recommended config)
 17.9k 1.04 GB, 143k 4.9 GB, 483k 9.3 GB, 858k 18.1 GB, 1.14M 34.7 GB (fits; before E15/E21 the 858k run needed
 34.6 GB). The default jax-md builder needs far more for non-cubic boxes (19 GB at 71.5k, 34.6 GB at 322k): its
