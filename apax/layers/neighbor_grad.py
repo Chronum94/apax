@@ -58,7 +58,12 @@ def _starts_kernel():
     import warp as wp
 
     @wp.func
-    def cval(pairs: wp.array2d(dtype=wp.int32), i: wp.int32, n_pairs: wp.int32, n_atoms: wp.int32):
+    def cval(
+        pairs: wp.array2d(dtype=wp.int32),
+        i: wp.int32,
+        n_pairs: wp.int32,
+        n_atoms: wp.int32,
+    ):
         c = wp.min(pairs[1, i], n_atoms)
         if i == n_pairs - 1 and n_pairs > 1:
             if pairs[1, i] < pairs[1, i - 1]:
@@ -149,7 +154,11 @@ def reverse_pairs(idx, n_atoms, with_starts=False):
         rev = pairs[2]
     else:
         (rev,) = _reverse_kernel()(
-            starts, pairs, int(n_atoms), jnp.full((P,), -1, jnp.int32), launch_dims=(P,),
+            starts,
+            pairs,
+            int(n_atoms),
+            jnp.full((P,), -1, jnp.int32),
+            launch_dims=(P,),
         )
         rev = jnp.where(rev < 0, jnp.int32(P), rev)
     if with_starts:
@@ -193,14 +202,19 @@ def _pair_bwd(res, cts):
     # reverse slots: cached row 2 of the pair array (ALCHEMI lists) or the computed vector
     rev_src, rev_row = (pairs, 2) if pairs.shape[0] >= 3 else (rev[None], 0)
     (grad_R,) = _reduce_kernel(S)(
-        starts, rev_src, rev_row, ct_c.astype(jnp.float32), ct_n.astype(jnp.float32), int(P),
-        zeros, launch_dims=(n_atoms, S),
+        starts,
+        rev_src,
+        rev_row,
+        ct_c.astype(jnp.float32),
+        ct_n.astype(jnp.float32),
+        int(P),
+        zeros,
+        launch_dims=(n_atoms, S),
     )
     return grad_R.astype(dtype), None
 
 
 gather_pair.defvjp(_pair_fwd, _pair_bwd)
-
 
 
 # --- fused periodic pair vectors (E21) -------------------------------------------------------
@@ -228,7 +242,11 @@ def _pair_vector_kernels(n_split):
         n = wp.min(pairs[0, p], n_atoms - 1)
         s = R[c] - R[n]
         h = wp.float32(0.5)
-        s = wp.vec3(s[0] - wp.floor(s[0] + h), s[1] - wp.floor(s[1] + h), s[2] - wp.floor(s[2] + h))
+        s = wp.vec3(
+            s[0] - wp.floor(s[0] + h),
+            s[1] - wp.floor(s[1] + h),
+            s[2] - wp.floor(s[2] + h),
+        )
         dr[p] = box[0] @ s
 
     @wp.kernel(module="unique")
@@ -267,8 +285,12 @@ def pair_vectors(R, idx, box):
     fwd, _ = _pair_vector_kernels(4)
     n_atoms, P = R.shape[0], idx.shape[1]
     (dr,) = fwd(
-        R.astype(jnp.float32), idx.astype(jnp.int32), jnp.asarray(box, jnp.float32)[None],
-        int(n_atoms), launch_dims=(P,), output_dims=(P, 3),
+        R.astype(jnp.float32),
+        idx.astype(jnp.int32),
+        jnp.asarray(box, jnp.float32)[None],
+        int(n_atoms),
+        launch_dims=(P,),
+        output_dims=(P, 3),
     )
     return dr
 
@@ -286,8 +308,13 @@ def _pv_bwd(res, ct):
     S = 4
     _, bwd = _pair_vector_kernels(S)
     (dR,) = bwd(
-        starts, rev_src, rev_row, ct.astype(jnp.float32), int(P),
-        jnp.zeros((n_atoms, 3), jnp.float32), launch_dims=(n_atoms, S),
+        starts,
+        rev_src,
+        rev_row,
+        ct.astype(jnp.float32),
+        int(P),
+        jnp.zeros((n_atoms, 3), jnp.float32),
+        launch_dims=(n_atoms, S),
     )
     return dR.astype(like.dtype), None, jnp.zeros_like(box)
 

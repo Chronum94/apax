@@ -37,7 +37,7 @@ from apax.train.checkpoints import (
 )
 from apax.train.run import setup_logging
 from apax.utils.convert import str_to_dtype
-from apax.utils.space import perpendicular_widths, periodic_general_elementwise
+from apax.utils.space import periodic_general_elementwise, perpendicular_widths
 
 log = logging.getLogger(__name__)
 
@@ -326,7 +326,11 @@ def _cuda_profiler():
     import nvidia
 
     for path in sorted(
-        glob.glob(os.path.join(os.path.dirname(nvidia.__path__[0] + "/"), "cu*/lib/libcudart.so*"))
+        glob.glob(
+            os.path.join(
+                os.path.dirname(nvidia.__path__[0] + "/"), "cu*/lib/libcudart.so*"
+            )
+        )
     ):
         try:
             return ctypes.CDLL(path)
@@ -702,8 +706,12 @@ def md_setup(model_config: Config, md_config: MDConfig):
         from apax.md.alchemi_neighbor_list import alchemi_neighbor_list
 
         neighbor_fn = alchemi_neighbor_list(
-            system.box, r_max, md_config.dr_threshold, md_config.capacity_multiplier,
-            sort_atoms=md_config.sort_atoms, species=system.atomic_numbers,
+            system.box,
+            r_max,
+            md_config.dr_threshold,
+            md_config.capacity_multiplier,
+            sort_atoms=md_config.sort_atoms,
+            species=system.atomic_numbers,
         )
     else:
         neighbor_fn = partition.neighbor_list(

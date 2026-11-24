@@ -64,7 +64,9 @@ def _kernels(
     F_OUT = F
     KPER = (K + C - 1) // C  # scalar channels per thread
     if KPER > 4:
-        raise ValueError(f"warp moments: n_radial ({K}) > 4 x n_radial_tensor ({C}) not supported")
+        raise ValueError(
+            f"warp moments: n_radial ({K}) > 4 x n_radial_tensor ({C}) not supported"
+        )
     R = float(r_max)
     PI_R = math.pi / R
     A = math.sqrt(2.0) * math.pi / R**1.5  # Bessel prefactor; the sign alternates with n
@@ -260,7 +262,12 @@ def _kernels(
         j = pairs[0, p]
         v = dr_vec[p]
         r2 = wp.dot(v, v)
-        if a >= n_atoms or j >= n_atoms or (j == a and r2 <= wp.float32(1e-12)) or r2 <= wp.float32(0.0):
+        if (
+            a >= n_atoms
+            or j >= n_atoms
+            or (j == a and r2 <= wp.float32(1e-12))
+            or r2 <= wp.float32(0.0)
+        ):
             grad[p] = wp.vec3()
             return
         r = wp.sqrt(r2)
@@ -288,7 +295,9 @@ def _kernels(
                 fcn = wp.float32(0.5) * (wp.cos(wp.float32(PI_RN) * r) + wp.float32(1.0))
                 dfcn = wp.float32(-0.5 * PI_RN) * wp.sin(wp.float32(PI_RN) * r)
                 c = wp.float32(HALF_SCALE) * wp.float32(zi * zj)
-                dEdr += g_nlh[a] * c * ((dphi * fcn + phi * dfcn) / r - phi * fcn / (r * r))
+                dEdr += (
+                    g_nlh[a] * c * ((dphi * fcn + phi * dfcn) / r - phi * fcn / (r * r))
+                )
         rp = r + wp.float32(_EPS_DN)
         d = v / rp
         x = d[0]
@@ -326,7 +335,14 @@ def _kernels(
             h122 = g[a, o3 + 8]
             h222 = g[a, o3 + 9]
             S = wp.dot(g1, d)
-            S += g00 * x * x + g01 * x * y + g02 * x * z + g11 * y * y + g12 * y * z + g22 * z * z
+            S += (
+                g00 * x * x
+                + g01 * x * y
+                + g02 * x * z
+                + g11 * y * y
+                + g12 * y * z
+                + g22 * z * z
+            )
             S += (
                 h000 * x * x * x
                 + h001 * x * x * y
@@ -425,9 +441,26 @@ def warp_packed_moments(
     else:
         nlh_a = nlh_b = jnp.zeros((1, 1, 3), jnp.float32)
         nlh_cfg = (0.0, 14.4)
-    cfg = (int(n_basis), int(K), int(C), float(r_max), int(n_atoms), int(n_el), int(n_split)) + nlh_cfg
+    cfg = (
+        int(n_basis),
+        int(K),
+        int(C),
+        float(r_max),
+        int(n_atoms),
+        int(n_el),
+        int(n_split),
+    ) + nlh_cfg
     out, e_nlh = _moments(
-        cfg, dr_vec.astype(jnp.float32), starts, pairs, Z, species_map, T0, T1, nlh_a, nlh_b
+        cfg,
+        dr_vec.astype(jnp.float32),
+        starts,
+        pairs,
+        Z,
+        species_map,
+        T0,
+        T1,
+        nlh_a,
+        nlh_b,
     )
     if packed:
         return (out, e_nlh) if nlh is not None else (out,)
@@ -448,13 +481,27 @@ def _moments(cfg, dr_vec, starts, pairs, Z, species_map, T0, T1, nlh_a, nlh_b):
     fwd, _, F, nlh_fwd, _ = _kernels(n_basis, K, C, r_max, S, nlh_rmax, nlh_scale)
     zeros = jnp.zeros((n_atoms, F), jnp.float32)
     (out,) = fwd(
-        starts, pairs, Z, species_map, dr_vec, T0, T1, n_el, zeros,
+        starts,
+        pairs,
+        Z,
+        species_map,
+        dr_vec,
+        T0,
+        T1,
+        n_el,
+        zeros,
         launch_dims=(n_atoms, C, S),
     )
     if nlh_rmax > 0.0:
         # separate output: XLA removes this call when the energy is not used (force-only steps)
         (e_nlh,) = nlh_fwd(
-            starts, pairs, Z, dr_vec, nlh_a, nlh_b, jnp.zeros((n_atoms,), jnp.float32),
+            starts,
+            pairs,
+            Z,
+            dr_vec,
+            nlh_a,
+            nlh_b,
+            jnp.zeros((n_atoms,), jnp.float32),
             launch_dims=(n_atoms, S),
         )
     else:
@@ -475,14 +522,30 @@ def _moments_bwd(cfg, res, cts):
     P = dr_vec.shape[0]
     gf = g.astype(jnp.float32)
     (G0,) = g0_table(
-        Z, species_map, T0, gf, n_el,
-        launch_dims=(n_atoms, n_el, n_basis), output_dims=(n_atoms, n_el, n_basis),
+        Z,
+        species_map,
+        T0,
+        gf,
+        n_el,
+        launch_dims=(n_atoms, n_el, n_basis),
+        output_dims=(n_atoms, n_el, n_basis),
     )
     (grad,) = bwd(
-        pairs, Z, species_map, dr_vec, T0, T1, nlh_a, nlh_b, gf, G0,
+        pairs,
+        Z,
+        species_map,
+        dr_vec,
+        T0,
+        T1,
+        nlh_a,
+        nlh_b,
+        gf,
+        G0,
         g_nlh.astype(jnp.float32),
-        n_atoms, n_el,
-        launch_dims=(P,), output_dims=(P, 3),
+        n_atoms,
+        n_el,
+        launch_dims=(P,),
+        output_dims=(P, 3),
     )
     return (grad, None, None, None, None, None, None, None, None)
 

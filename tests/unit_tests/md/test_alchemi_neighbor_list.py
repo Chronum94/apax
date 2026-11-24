@@ -73,17 +73,25 @@ def test_sorted_frame_evaluates_in_sorted_space_and_maps_back():
 
     def model(params, R, Z, neighbor, box, offsets):
         assert neighbor is idx  # the wrapper passes the (sorted-space) index array
-        return {"energy": jnp.sum(Z * R[:, 0] ** 2), "forces": R * Z[:, None], "stress": jnp.eye(3)}
+        return {
+            "energy": jnp.sum(Z * R[:, 0] ** 2),
+            "forces": R * Z[:, None],
+            "stress": jnp.eye(3),
+        }
 
     idx = jnp.zeros((2, 4), jnp.int32)
     nbrs = types.SimpleNamespace(idx=idx, perm=jnp.asarray(perm), inv=jnp.asarray(inv))
-    out = sorted_frame(model, unpermute_outputs=True)(None, R, jnp.asarray(Z), nbrs, None, None)
+    out = sorted_frame(model, unpermute_outputs=True)(
+        None, R, jnp.asarray(Z), nbrs, None, None
+    )
     np.testing.assert_allclose(out["energy"], jnp.sum(Z * R[:, 0] ** 2), rtol=1e-12)
     np.testing.assert_allclose(out["forces"], R * Z[:, None], rtol=1e-12)
     np.testing.assert_array_equal(out["stress"], jnp.eye(3))
     # without a permutation the wrapper is the identity
     plain = types.SimpleNamespace(idx=idx)
-    out2 = sorted_frame(lambda *a: a[3], unpermute_outputs=True)(None, R, Z, plain, None, None)
+    out2 = sorted_frame(lambda *a: a[3], unpermute_outputs=True)(
+        None, R, Z, plain, None, None
+    )
     assert out2 is plain
 
 
@@ -106,7 +114,12 @@ def _reference(atoms):
     box = np.asarray(atoms.cell.array.T)
     disp, _ = periodic_general_elementwise(box)
     fn = partition.neighbor_list(
-        disp, box, CUTOFF, SKIN, fractional_coordinates=True, format=partition.Sparse,
+        disp,
+        box,
+        CUTOFF,
+        SKIN,
+        fractional_coordinates=True,
+        format=partition.Sparse,
         capacity_multiplier=CM,
     )
     frac = jnp.asarray(atoms.get_scaled_positions(wrap=True), jnp.float32)

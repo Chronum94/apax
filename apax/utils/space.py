@@ -90,7 +90,9 @@ def periodic_general_elementwise(box: Array, wrapped: bool = True):
     )
 
     def displacement_fn(Ra, Rb, perturbation=None, **kwargs):
-        dR = jnp.mod(Ra - Rb + 0.5, 1.0) - 0.5  # jax_md.space.periodic_displacement(1.0, .)
+        dR = (
+            jnp.mod(Ra - Rb + 0.5, 1.0) - 0.5
+        )  # jax_md.space.periodic_displacement(1.0, .)
         # Default (captured) box follows the positions' dtype: neighbour lists are built in
         # fp32 (nbr_f32) and must not be promoted to fp64 by an fp64 system box (fp64 is
         # ~1/64 rate on many GPUs). An explicitly passed box keeps jax-md's promotion.

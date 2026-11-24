@@ -69,11 +69,17 @@ def morton_order(frac, species):
     species: static (N,) integer array."""
     species = np.asarray(species)
     g = jnp.clip(jnp.floor(jnp.mod(frac, 1.0) * 1024.0), 0, 1023).astype(jnp.uint32)
-    key = _spread_bits(g[:, 0]) | (_spread_bits(g[:, 1]) << 1) | (_spread_bits(g[:, 2]) << 2)
+    key = (
+        _spread_bits(g[:, 0])
+        | (_spread_bits(g[:, 1]) << 1)
+        | (_spread_bits(g[:, 2]) << 2)
+    )
     _, sp = np.unique(species, return_inverse=True)
     key = jnp.asarray(sp, jnp.uint64) << 30 | key.astype(jnp.uint64)  # species-major
     order = jnp.argsort(key, stable=True).astype(jnp.int32)
-    slots = np.argsort(sp, kind="stable").astype(np.int32)  # each species' slots, in order
+    slots = np.argsort(sp, kind="stable").astype(
+        np.int32
+    )  # each species' slots, in order
     N = frac.shape[0]
     perm = jnp.zeros((N,), jnp.int32).at[slots].set(order)
     inv = jnp.zeros((N,), jnp.int32).at[perm].set(jnp.arange(N, dtype=jnp.int32))
@@ -98,7 +104,12 @@ def sorted_frame(model, unpermute_outputs=False):
             return out
 
         def back(x):
-            if hasattr(x, "shape") and x.ndim >= 1 and x.shape[0] == N and x.shape != (3, 3):
+            if (
+                hasattr(x, "shape")
+                and x.ndim >= 1
+                and x.shape[0] == N
+                and x.shape != (3, 3)
+            ):
                 return x[neighbor.inv]
             return x
 
@@ -136,11 +147,15 @@ def alchemi_neighbor_list(
 
     def _search(frac, capacity):
         out = anb.cell_list(
-            _cart(frac), cutoff, cell=cell, pbc=pbc,
+            _cart(frac),
+            cutoff,
+            cell=cell,
+            pbc=pbc,
             max_neighbors=static["max_neighbors"],
             max_total_cells=static["max_total_cells"],
             neighbor_search_radius=static["search_radius"],
-            return_neighbor_list=True, coo_capacity=int(capacity),
+            return_neighbor_list=True,
+            coo_capacity=int(capacity),
         )
         coo, counts, valid = out[0], out[3], out[4]
         idx = jnp.stack([coo[1], coo[0]])  # jax-md: row 0 neighbour, row 1 centre
@@ -175,11 +190,17 @@ def alchemi_neighbor_list(
         return (*_with_reverse(*_search(frac[perm], capacity), N), perm, inv)
 
     def _make(idx, position, err, capacity, perm, inv):
-        fields = dict(
-            idx=idx, reference_position=position, error=err, cell_list_capacity=None,
-            max_occupancy=capacity, format=partition.NeighborListFormat.Sparse,
-            cell_size=None, cell_list_fn=None, update_fn=update_fn,
-        )
+        fields = {
+            "idx": idx,
+            "reference_position": position,
+            "error": err,
+            "cell_list_capacity": None,
+            "max_occupancy": capacity,
+            "format": partition.NeighborListFormat.Sparse,
+            "cell_size": None,
+            "cell_list_fn": None,
+            "update_fn": update_fn,
+        }
         if sort_atoms:
             return SortedNeighborList(**fields, perm=perm, inv=inv)
         return partition.NeighborList(**fields)
@@ -199,7 +220,10 @@ def alchemi_neighbor_list(
             return _make(idx, pos, err, capacity, perm, inv)
 
         return jax.lax.cond(
-            jnp.any(moved > threshold_sq), rebuild, lambda args: nbrs, (position, nbrs.error)
+            jnp.any(moved > threshold_sq),
+            rebuild,
+            lambda args: nbrs,
+            (position, nbrs.error),
         )
 
     def allocate_fn(position, extra_capacity=0, **kwargs):
@@ -207,17 +231,26 @@ def alchemi_neighbor_list(
         N = frac.shape[0]
         mtc, _, nsr = anb.estimate_cell_list_sizes(_cart(frac), cell, cutoff, pbc=pbc)
         out = anb.cell_list(  # eager sizing call
-            _cart(frac), cutoff, cell=cell, pbc=pbc, max_total_cells=mtc,
-            neighbor_search_radius=nsr, return_neighbor_list=True,
+            _cart(frac),
+            cutoff,
+            cell=cell,
+            pbc=pbc,
+            max_total_cells=mtc,
+            neighbor_search_radius=nsr,
+            return_neighbor_list=True,
         )
         counts = np.diff(np.asarray(out[1]))  # compact form: (coo, ptr, shifts)
         static.update(
             max_total_cells=int(mtc),
             search_radius=nsr,
-            max_neighbors=int(counts.max() * capacity_multiplier) + int(extra_capacity) + 1,
+            max_neighbors=int(counts.max() * capacity_multiplier)
+            + int(extra_capacity)
+            + 1,
         )
         capacity = int(counts.sum() * capacity_multiplier + N * extra_capacity)
         idx, err, perm, inv = _build(frac, capacity)
         return _make(idx, position, err, capacity, perm, inv)
 
-    return partition.NeighborListFns(allocate_fn, update_fn)  # pytype: disable=wrong-arg-count
+    return partition.NeighborListFns(
+        allocate_fn, update_fn
+    )  # pytype: disable=wrong-arg-count

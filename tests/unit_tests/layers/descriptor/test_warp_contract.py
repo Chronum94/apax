@@ -48,7 +48,9 @@ def _reference(packed, n_contr, drop):
         unpack_symmetric(packed[:, K + 3 * C : K + 9 * C].reshape(-1, C, 6), _G2),
         unpack_symmetric(packed[:, K + 9 * C :].reshape(-1, C, 10), _G3),
     ]
-    return GaussianMomentDescriptor._contract(fake, moments, packed.shape[0], packed.dtype)
+    return GaussianMomentDescriptor._contract(
+        fake, moments, packed.shape[0], packed.dtype
+    )
 
 
 def _packed(n_atoms, seed=0):
@@ -63,21 +65,28 @@ def test_backward_work_list_covers_every_slot_once():
     table = tuple(map(tuple, feature_table(C).tolist()))
     chunks, entries = backward_chunks(table, 4)
     n_slots = {1: 2, 2: 2, 3: 2, 4: 3, 5: 3, 6: 3, 7: 3}
-    expected = sorted((f, p) for f, row in enumerate(table) for p in range(n_slots[row[0]]))
+    expected = sorted(
+        (f, p) for f, row in enumerate(table) for p in range(n_slots[row[0]])
+    )
     got = sorted(
         (int(entries[s + e]), int(pos))
         for (_, fam, pos, s, n, _) in chunks
         for e in range(n)
     )
     assert got == expected
-    assert chunk_length(3861) == 4 and chunk_length(17875) == 16 and chunk_length(10**6) == 32
+    assert (
+        chunk_length(3861) == 4
+        and chunk_length(17875) == 16
+        and chunk_length(10**6) == 32
+    )
 
 
 @requires_gpu
 @pytest.mark.parametrize(
     "n_contr, drop", [(8, ()), (8, (3, 6)), (5, ())], ids=["all", "drop36", "ncontr5"]
 )
-@pytest.mark.parametrize("n_atoms", [257, 5000])  # chunk length 4 and 4/8 (see chunk_length)
+# 257 and 5000 atoms: small and larger grids of the per-(family, position) kernels
+@pytest.mark.parametrize("n_atoms", [257, 5000])
 def test_warp_contract_matches_xla(n_atoms, n_contr, drop):
     p = _packed(n_atoms)
     ref, vjp_ref = jax.vjp(

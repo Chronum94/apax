@@ -42,7 +42,9 @@ def _system():
     idx = nbr_fn.allocate(pos, extra_capacity=16).idx
     N = len(atoms)
     dr = jax.vmap(disp)(pos[jnp.minimum(idx[1], N - 1)], pos[jnp.minimum(idx[0], N - 1)])
-    dr = jnp.where((idx[1] < N)[:, None], dr, 0.0).astype(jnp.float32)  # centre - neighbour
+    dr = jnp.where((idx[1] < N)[:, None], dr, 0.0).astype(
+        jnp.float32
+    )  # centre - neighbour
     return atoms, idx, dr
 
 
@@ -97,14 +99,18 @@ def test_warp_moments_match_xla_fp64(n_split):
     W = rng.normal(size=(K, C)) * 0.3
 
     ref, vjp_ref = jax.vjp(
-        lambda d: _reference(d, idx, Z, jnp.asarray(smap), n_el, jnp.asarray(T0), jnp.asarray(W), N),
+        lambda d: _reference(
+            d, idx, Z, jnp.asarray(smap), n_el, jnp.asarray(T0), jnp.asarray(W), N
+        ),
         dr,
     )
 
     def warp(d):
         T0f = jnp.asarray(T0, jnp.float32)
         T1f = fold_compression(T0f, jnp.asarray(W, jnp.float32))
-        m0, m1, p2, p3 = warp_packed_moments(d, Z, idx, smap, T0f, T1f, R_MAX, n_split=n_split)
+        m0, m1, p2, p3 = warp_packed_moments(
+            d, Z, idx, smap, T0f, T1f, R_MAX, n_split=n_split
+        )
         return jnp.concatenate(
             [m0, m1.reshape(N, -1), p2.reshape(N, -1), p3.reshape(N, -1)], axis=1
         )

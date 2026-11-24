@@ -50,7 +50,9 @@ from apax.layers.descriptor.triangular_indices import tril_2d_indices, tril_3d_i
 
 def feature_table(C, n_contr=8, drop_contractions=()):
     """(n_features, 4) int32 rows (family, c0, c1, c2) for contr_1..7 in `_contract` order."""
-    with jax.ensure_compile_time_eval():  # the helpers build jnp arrays; keep them concrete
+    with (
+        jax.ensure_compile_time_eval()
+    ):  # the helpers build jnp arrays; keep them concrete
         t2 = np.asarray(tril_2d_indices(C))
         t3 = np.asarray(tril_3d_indices(C))
     blocks = {
@@ -151,7 +153,11 @@ def _kernels(K, C):
             x0, x1, x2 = mats_d(m, a, c0)
             C1 = mat_c(m, a, c1)
             b2 = vec_b(m, a, c2)
-            v = wp.dot(row(C1, 0), x0 @ b2) + wp.dot(row(C1, 1), x1 @ b2) + wp.dot(row(C1, 2), x2 @ b2)
+            v = (
+                wp.dot(row(C1, 0), x0 @ b2)
+                + wp.dot(row(C1, 1), x1 @ b2)
+                + wp.dot(row(C1, 2), x2 @ b2)
+            )
         feats[a, f] = v
 
     @wp.func
@@ -207,14 +213,24 @@ def _kernels(K, C):
 
     @wp.func
     def add_d(
-        grad: wp.array2d(dtype=wp.float32), a: int, c: int, d0: wp.mat33, d1: wp.mat33, d2: wp.mat33
+        grad: wp.array2d(dtype=wp.float32),
+        a: int,
+        c: int,
+        d0: wp.mat33,
+        d1: wp.mat33,
+        d2: wp.mat33,
     ):
         o = B3 + 10 * c
         wp.atomic_add(grad, o, a, d0[0, 0])
         wp.atomic_add(grad, o + 1, a, d0[0, 1] + d0[1, 0] + d1[0, 0])
         wp.atomic_add(grad, o + 2, a, d0[0, 2] + d0[2, 0] + d2[0, 0])
         wp.atomic_add(grad, o + 3, a, d0[1, 1] + d1[0, 1] + d1[1, 0])
-        wp.atomic_add(grad, o + 4, a, d0[1, 2] + d0[2, 1] + d1[0, 2] + d1[2, 0] + d2[0, 1] + d2[1, 0])
+        wp.atomic_add(
+            grad,
+            o + 4,
+            a,
+            d0[1, 2] + d0[2, 1] + d1[0, 2] + d1[2, 0] + d2[0, 1] + d2[1, 0],
+        )
         wp.atomic_add(grad, o + 5, a, d0[2, 2] + d2[0, 2] + d2[2, 0])
         wp.atomic_add(grad, o + 6, a, d1[1, 1])
         wp.atomic_add(grad, o + 7, a, d1[1, 2] + d1[2, 1] + d2[1, 1])
@@ -227,6 +243,7 @@ def _kernels(K, C):
         are split per position: in one kernel their three branches' D-tensor temporaries
         needed 126-166 registers (16-31 % occupancy, E25)."""
         KIND = _KIND.get((FAM, POS), -1)
+
         @wp.kernel(module="unique")
         def gm_contract_bwd(
             m: wp.array2d(dtype=wp.float32),
@@ -303,7 +320,9 @@ def _kernels(K, C):
                         x0, x1, x2 = mats_dT(m, a, c0)
                         y0, y1, y2 = mats_dT(m, a, c1)
                         dC += gf * (
-                            wp.transpose(x0) @ y0 + wp.transpose(x1) @ y1 + wp.transpose(x2) @ y2
+                            wp.transpose(x0) @ y0
+                            + wp.transpose(x1) @ y1
+                            + wp.transpose(x2) @ y2
                         )
                 if wp.static(FAM == 7):
                     if wp.static(POS == 0):
@@ -318,7 +337,9 @@ def _kernels(K, C):
                         v0 = x0 @ b2
                         v1 = x1 @ b2
                         v2 = x2 @ b2
-                        dC += gf * wp.mat33(v0[0], v0[1], v0[2], v1[0], v1[1], v1[2], v2[0], v2[1], v2[2])
+                        dC += gf * wp.mat33(
+                            v0[0], v0[1], v0[2], v1[0], v1[1], v1[2], v2[0], v2[1], v2[2]
+                        )
                     if wp.static(POS == 2):
                         x0, x1, x2 = mats_dT(m, a, c0)
                         C1 = mat_cT(m, a, c1)
@@ -334,15 +355,17 @@ def _kernels(K, C):
             if wp.static(KIND == 2):
                 add_d(grad, a, r, dD0, dD1, dD2)
             if wp.static(KIND < 0):
-                kind = chunks[ci, 5]  # which tensor of channel r this chunk differentiates
+                kind = chunks[
+                    ci, 5
+                ]  # which tensor of channel r this chunk differentiates
                 if kind == 0:
                     add_b(grad, a, r, dB)
                 elif kind == 1:
                     add_c(grad, a, r, dC)
                 else:
                     add_d(grad, a, r, dD0, dD1, dD2)
-        return wp.jax_kernel(gm_contract_bwd, num_outputs=1, in_out_argnames=["grad"])
 
+        return wp.jax_kernel(gm_contract_bwd, num_outputs=1, in_out_argnames=["grad"])
 
     fwd = wp.jax_kernel(gm_contract_fwd, num_outputs=1)
     # one kernel per family; families 6 and 7 one per (family, slot position)
@@ -357,8 +380,10 @@ def _contract(cfg, packed):
     fwd, _ = _kernels(K, C)
     n_atoms, n_feat = packed.shape[0], len(table)
     (feats,) = fwd(
-        packed, jnp.asarray(np.asarray(table, np.int32)),
-        launch_dims=(n_atoms, n_feat), output_dims=(n_atoms, n_feat),
+        packed,
+        jnp.asarray(np.asarray(table, np.int32)),
+        launch_dims=(n_atoms, n_feat),
+        output_dims=(n_atoms, n_feat),
     )
     return feats
 
@@ -368,9 +393,26 @@ def _contract_fwd(cfg, packed):
 
 
 # tensor differentiated by (family, slot position): 0 = b (m1), 1 = C (m2), 2 = D (m3)
-_KIND = {(1, 0): 0, (1, 1): 0, (2, 0): 1, (2, 1): 1, (3, 0): 2, (3, 1): 2,
-         (4, 0): 1, (4, 1): 1, (4, 2): 1, (5, 0): 0, (5, 1): 0, (5, 2): 1,
-         (6, 0): 2, (6, 1): 2, (6, 2): 1, (7, 0): 2, (7, 1): 1, (7, 2): 0}
+_KIND = {
+    (1, 0): 0,
+    (1, 1): 0,
+    (2, 0): 1,
+    (2, 1): 1,
+    (3, 0): 2,
+    (3, 1): 2,
+    (4, 0): 1,
+    (4, 1): 1,
+    (4, 2): 1,
+    (5, 0): 0,
+    (5, 1): 0,
+    (5, 2): 1,
+    (6, 0): 2,
+    (6, 1): 2,
+    (6, 2): 1,
+    (7, 0): 2,
+    (7, 1): 1,
+    (7, 2): 0,
+}
 _N_SLOTS = {1: 2, 2: 2, 3: 2, 4: 3, 5: 3, 6: 3, 7: 3}
 
 
@@ -414,7 +456,13 @@ def _contract_bwd(cfg, packed, g):
         sel = (chunks[:, 1] == fam) & ((chunks[:, 2] == p) if p >= 0 else True)
         ch = chunks[sel]
         (gradT,) = bwd[(fam, p)](
-            mT, table_a, jnp.asarray(ch), entries_a, gT, gradT, launch_dims=(len(ch), packed.shape[0])
+            mT,
+            table_a,
+            jnp.asarray(ch),
+            entries_a,
+            gT,
+            gradT,
+            launch_dims=(len(ch), packed.shape[0]),
         )
     return (gradT.T,)
 

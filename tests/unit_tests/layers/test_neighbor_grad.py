@@ -58,7 +58,11 @@ def _synthetic_lists():
     c = np.sort(rng.integers(0, 50, 400))
     c[-30:] = 50  # padding at the end and atoms without pairs
     yield "padding", np.stack([rng.integers(0, 50, 400), c]), 50
-    yield "no_padding", np.stack([rng.integers(0, 50, 400), np.sort(rng.integers(0, 50, 400))]), 50
+    yield (
+        "no_padding",
+        np.stack([rng.integers(0, 50, 400), np.sort(rng.integers(0, 50, 400))]),
+        50,
+    )
     c3 = np.sort(np.where(np.arange(64) < 10, 3, 20))
     c3[-1] = 1  # stray out-of-order last slot
     yield "stray_slot", np.stack([np.zeros(64, int), c3]), 20
@@ -78,7 +82,9 @@ def test_csr_and_reverse_pairs_on_jax_md_list(sheared):
     P = idx_np.shape[1]
     rev, pairs, starts = jax.jit(lambda i: reverse_pairs(i, N, with_starts=True))(idx)
     np.testing.assert_array_equal(np.asarray(starts), _starts_reference(idx_np[1], N))
-    slot = {(int(idx_np[1, p]), int(idx_np[0, p])): p for p in range(P) if idx_np[1, p] < N}
+    slot = {
+        (int(idx_np[1, p]), int(idx_np[0, p])): p for p in range(P) if idx_np[1, p] < N
+    }
     ref = np.array(
         [
             slot.get((int(idx_np[0, p]), int(idx_np[1, p])), P) if idx_np[1, p] < N else P
@@ -100,11 +106,16 @@ def test_gather_pair_vjp(sheared):
 
     valid = (idx[1] < N)[:, None]
     rng = np.random.default_rng(3)
-    cts = tuple(jnp.asarray(rng.normal(size=(idx.shape[1], 3)), jnp.float32) * valid for _ in range(2))
+    cts = tuple(
+        jnp.asarray(rng.normal(size=(idx.shape[1], 3)), jnp.float32) * valid
+        for _ in range(2)
+    )
     a, va = jax.vjp(plain, R)
     b, vb = jax.vjp(lambda R: gather_pair(R, idx), R)
     for x, y in zip(a, b):
-        np.testing.assert_array_equal(np.asarray(x)[np.asarray(valid[:, 0])], np.asarray(y)[np.asarray(valid[:, 0])])
+        np.testing.assert_array_equal(
+            np.asarray(x)[np.asarray(valid[:, 0])], np.asarray(y)[np.asarray(valid[:, 0])]
+        )
     (ga,), (gb,) = va(cts), vb(cts)
     assert float(jnp.abs(ga - gb).max() / jnp.abs(ga).max()) < 1e-5
 
@@ -129,4 +140,6 @@ def test_pair_vectors_match_xla(sheared, cached_rev):
     ct = jnp.asarray(np.random.default_rng(4).normal(size=a.shape), jnp.float32)
     ct = ct * (idx[1] < N)[:, None]  # padding cotangents are zero in the model (masked)
     (ga,), (gb,) = va(ct), vb(ct)
-    np.testing.assert_allclose(np.asarray(gb), np.asarray(ga), rtol=1e-5, atol=1e-5 * float(jnp.abs(ga).max()))
+    np.testing.assert_allclose(
+        np.asarray(gb), np.asarray(ga), rtol=1e-5, atol=1e-5 * float(jnp.abs(ga).max())
+    )
