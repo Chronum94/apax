@@ -82,10 +82,12 @@ class EnergyModel(nn.Module):
     mask_atoms: bool = True
     inference_disp_fn: Any = None
     geometry_dtype: Any = jnp.float64
+    # "pull": scatter-free neighbour-gather backward for jax-md Sparse lists (MD only)
+    neighbor_grad: str = "scatter"
 
     def setup(self):
         self.compute_distances = make_distance_fn(
-            self.init_box, self.inference_disp_fn, self.geometry_dtype
+            self.init_box, self.inference_disp_fn, self.geometry_dtype, self.neighbor_grad
         )
 
     def __call__(
@@ -109,6 +111,9 @@ class EnergyModel(nn.Module):
         # shape Natoms
         # shape shallow ens: Natoms x Nensemble
         g = self.representation(dr_vec, Z, idx)
+        e_fused = None
+        if isinstance(g, tuple):  # descriptor with a fused pair energy (e.g. NLH in Warp)
+            g, e_fused = g
         h = jax.vmap(self.readout)(g)
         E_i = self.scale_shift(h, Z)
 
@@ -129,6 +134,9 @@ class EnergyModel(nn.Module):
         for property_head in self.property_heads:
             result = property_head(g, R, dr_vec, Z, idx, box)
             properties.update(result)
+
+        if e_fused is not None:
+            energy = energy + fp64_sum(mask_by_atom(e_fused, Z))
 
         # Corrections
         for correction in self.corrections:

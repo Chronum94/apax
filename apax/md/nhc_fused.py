@@ -7,6 +7,12 @@ per MD step. Here the substeps and chain links are unrolled in Python (all their
 are static), the chain is kept as scalars, and the momentum is rescaled once per half
 step by the product of the substep scales. The arithmetic is the same as jax_md 0.2.29
 ``simulate.nose_hoover_chain``; only the order of the momentum multiplications differs.
+
+E23: the chain is one serial dependency chain of ~60 exp and ~70 divisions per MD step
+(chain 3, 2 x 3 substeps), latency-bound on the fp64 units (1/64 rate on many GPUs): ~38 us
+per step regardless of system size. 1/Q is formed once per half step, so the substeps
+multiply instead of divide (fp64 reassociation only: per-step scale-factor error 1e-8
+relative to |scale - 1|; ~23 us per step).
 """
 import jax.numpy as jnp
 from jax.tree_util import tree_map
@@ -18,6 +24,7 @@ from jax_md.simulate import (
 )
 
 f32 = util.f32
+
 
 
 def nose_hoover_chain_fused(
@@ -32,7 +39,8 @@ def nose_hoover_chain_fused(
         return NoseHooverChain(xi, p_xi, Q, tau, KE, degrees_of_freedom)
 
     def substep(delta, xi, p_xi, Q, KE, DOF, kT):
-        """One chain update on lists of scalars; returns the momentum scale factor."""
+        """One chain update on lists of scalars; returns the momentum scale factor.
+        Q: the inverse chain masses 1 / Q (precomputed per half step)."""
         delta_2 = delta / f32(2.0)
         delta_4 = delta_2 / f32(2.0)
         delta_8 = delta_4 / f32(2.0)
@@ -40,34 +48,34 @@ def nose_hoover_chain_fused(
         M = chain_length - 1
         p_xi = list(p_xi)
 
-        G = p_xi[M - 1] ** f32(2) / Q[M - 1] - kT
+        G = p_xi[M - 1] ** f32(2) * Q[M - 1] - kT
         p_xi[M] = p_xi[M] + delta_4 * G
 
         # backward sweep m = M-1 .. 1; each update uses the old p_xi[m - 1], p_xi[m]
         # and the newly updated p_xi[m + 1]
         p_new = p_xi[M]
         for m in range(M - 1, 0, -1):
-            G = p_xi[m - 1] ** 2 / Q[m - 1] - kT
-            scale = jnp.exp(-delta_8 * p_new / Q[m + 1])
+            G = p_xi[m - 1] ** 2 * Q[m - 1] - kT
+            scale = jnp.exp(-delta_8 * p_new * Q[m + 1])
             p_new = scale * (scale * p_xi[m] + delta_4 * G)
             p_xi[m] = p_new
 
         G = f32(2.0) * KE - DOF * kT
-        scale = jnp.exp(-delta_8 * p_xi[1] / Q[1])
+        scale = jnp.exp(-delta_8 * p_xi[1] * Q[1])
         p_xi[0] = scale * (scale * p_xi[0] + delta_4 * G)
 
-        p_scale = jnp.exp(-delta_2 * p_xi[0] / Q[0])
+        p_scale = jnp.exp(-delta_2 * p_xi[0] * Q[0])
         KE = KE * p_scale ** f32(2)
 
-        xi = [xi[m] + delta_2 * p_xi[m] / Q[m] for m in range(chain_length)]
+        xi = [xi[m] + delta_2 * p_xi[m] * Q[m] for m in range(chain_length)]
 
         G = f32(2) * KE - DOF * kT
         # forward sweep m = 0 .. M-1; uses the p_xi[m + 1] from before this sweep
         p_old = list(p_xi)
         for m in range(M):
-            scale = jnp.exp(-delta_8 * p_old[m + 1] / Q[m + 1])
+            scale = jnp.exp(-delta_8 * p_old[m + 1] * Q[m + 1])
             p_xi[m] = scale * (scale * p_old[m] + delta_4 * G)
-            G = p_xi[m] ** 2 / Q[m] - kT
+            G = p_xi[m] ** 2 * Q[m] - kT
         p_xi[M] = p_xi[M] + delta_4 * G
 
         return xi, p_xi, KE, p_scale
@@ -76,7 +84,7 @@ def nose_hoover_chain_fused(
         xi, p_xi, Q, _tau, KE, DOF = dataclasses.astuple(state)
         xi = [xi[m] for m in range(chain_length)]
         p_xi = [p_xi[m] for m in range(chain_length)]
-        Qs = [Q[m] for m in range(chain_length)]
+        inv_Q = [1 / Q[m] for m in range(chain_length)]
 
         if chain_steps == 1 and sy_steps == 1:
             deltas = [dt]
@@ -89,7 +97,7 @@ def nose_hoover_chain_fused(
 
         total_scale = 1.0
         for delta in deltas:
-            xi, p_xi, KE, s = substep(delta, xi, p_xi, Qs, KE, DOF, kT)
+            xi, p_xi, KE, s = substep(delta, xi, p_xi, inv_Q, KE, DOF, kT)
             total_scale = total_scale * s
 
         P = tree_map(lambda p: p * total_scale, P)

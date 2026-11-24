@@ -1,5 +1,5 @@
 import os
-from typing import Literal, Union
+from typing import Literal, Optional, Union
 
 import yaml
 from pydantic import BaseModel, Field, NonNegativeInt, PositiveFloat, PositiveInt
@@ -337,6 +337,10 @@ class MDConfig(BaseModel, frozen=True, extra="forbid"):
         | Number of collected frames to be dumped at once.
     dr_threshold : float, default = 0.5
         | Skin of the neighborlist.
+    capacity_multiplier : float, default = 1.25
+        | jax-md neighbour-list capacity = occupancy * capacity_multiplier + extra_capacity. Every
+        | pair-level kernel runs over the full capacity, so slack costs time; overflows trigger a
+        | (logged) reallocation and chunk redo.
     extra_capacity : int, default = 0
         | JaxMD allocates a maximal number of neighbors. This argument lets you add
         | additional capacity to avoid recompilation. The default is usually fine.
@@ -368,6 +372,33 @@ class MDConfig(BaseModel, frozen=True, extra="forbid"):
         | These will be loaded with the `restart` option.
     disable_pbar : bool, False
         | Disables the MD progressbar.
+    neighbor_builder : "jax_md" | "alchemi", default = "jax_md"
+        | "alchemi": build the sparse neighbour list with NVIDIA ALCHEMI Toolkit-Ops
+        | (`pip install nvalchemi-toolkit-ops`; apax/md/alchemi_neighbor_list.py): no
+        | materialised candidate pairs. Periodic constant-box ensembles only.
+    sort_atoms : bool, default = True
+        | With neighbor_builder: alchemi, renumber atoms internally in Morton (Z-order) at
+        | every neighbour-list rebuild, for cache locality (outputs stay in input order).
+        | Long runs scramble the input order: +13 % at 18k-104k atoms, +2.5 % at 3.9k; ~3 %
+        | cost on a freshly built, spatially ordered structure (SPEEDUPS.md, E14).
+    fuse_nlh : bool, default = False
+        | With moment_kernel: warp, evaluate the NLH repulsion correction inside the Warp
+        | moment kernels (one pass over the pairs, no separate pair cotangent).
+    matmul_precision : "highest" | "default", default = "highest"
+        | `jax_default_matmul_precision` for the simulation. "highest" keeps fp32 matmuls/einsums
+        | at full fp32 (no TF32 on Ampere+ GPUs): ~7x smaller force error vs fp64 for ~3-4 % speed.
+    neighbor_grad : "scatter" | "pull", default = "scatter"
+        | Backward pass of the neighbour-position gather. "pull" replaces the contended
+        | unsorted scatter-add by a reverse-pair gather plus a sorted segment sum (needs
+        | NVIDIA Warp; relies on jax-md's symmetric, centre-sorted Sparse lists).
+    contract_kernel : "xla" | "warp", default = "xla"
+        | With moment_kernel: warp, compute the Gaussian-moment contractions (and their
+        | gradient) with fused Warp kernels instead of XLA einsums
+        | (`apax/layers/descriptor/warp_contract.py`).
+    moment_kernel : "warp" | None, default = None
+        | Fused NVIDIA Warp kernels for the Gaussian moments and their gradient (GMNN with
+        | the Bessel basis and identity radial transform; implies `tabulate_radial`;
+        | no hessian). See `apax/layers/descriptor/warp_moments.py`.
     tabulate_radial : bool, default = False
         | Evaluate the radial function from per element pair coefficient tables built at
         | start-up for the elements of the system (exact; inference only, see
@@ -387,6 +418,7 @@ class MDConfig(BaseModel, frozen=True, extra="forbid"):
     buffer_size: PositiveInt = 2500
     dr_threshold: PositiveFloat = 0.5
     extra_capacity: NonNegativeInt = 0
+    capacity_multiplier: PositiveFloat = 1.25
     disable_cell_list: bool = False
 
     biases: list[BiasEnergy] = []
@@ -405,6 +437,13 @@ class MDConfig(BaseModel, frozen=True, extra="forbid"):
     checkpoint_interval: int = 50_000
     disable_pbar: bool = False
     tabulate_radial: bool = False
+    moment_kernel: Optional[Literal["warp"]] = None
+    contract_kernel: Literal["xla", "warp"] = "xla"
+    matmul_precision: Literal["highest", "default"] = "highest"
+    fuse_nlh: bool = False
+    neighbor_builder: Literal["jax_md", "alchemi"] = "jax_md"
+    sort_atoms: bool = True
+    neighbor_grad: Literal["scatter", "pull"] = "scatter"
 
     def dump_config(self):
         """

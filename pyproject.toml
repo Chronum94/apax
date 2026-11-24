@@ -62,6 +62,16 @@ optuna = [
 openmm = [
     "openmm>=8.5.0b0",
 ]
+# GPU kernels for MD inference (moment_kernel: warp, neighbor_grad: pull)
+warp = [
+    "warp-lang>=1.16.0",
+]
+# NVIDIA ALCHEMI neighbour lists (neighbor_builder: alchemi); base package only, its [jax]
+# extra pins jax<0.10.2
+alchemi = [
+    "warp-lang>=1.16.0",
+    "nvalchemi-toolkit-ops>=0.5.0",
+]
 
 [dependency-groups]
 dev = [

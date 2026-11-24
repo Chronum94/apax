@@ -246,12 +246,24 @@ class ModelBuilder:
     ):
         log.debug("Building atomistic model")
 
-        descriptor = self.build_descriptor(apply_mask)
+        corrections = self.build_corrections(apply_mask=apply_mask)
+        fused_nlh = None
+        if self.config.get("fuse_nlh") and self.config.get("moment_kernel") == "warp":
+            # move the NLH repulsion into the Warp moment kernels (one pair pass)
+            nlh = [c for c in corrections if c.__class__.__name__ == "NLHRepulsion"]
+            if nlh:
+                c = nlh[0]
+                fused_nlh = (c.a, c.b, float(c.r_max), float(c.rep_scale))
+                corrections = [x for x in corrections if x is not c]
+        descriptor = (
+            self.build_descriptor(apply_mask, fused_nlh=fused_nlh)
+            if fused_nlh is not None
+            else self.build_descriptor(apply_mask)
+        )
         readout = self.build_readout(self.config)
         scale_shift = self.build_scale_shift(scale, shift)
 
         property_heads = self.build_property_heads(apply_mask=apply_mask)
-        corrections = self.build_corrections(apply_mask=apply_mask)
 
         model = EnergyModel(
             representation=descriptor,
@@ -262,6 +274,7 @@ class ModelBuilder:
             init_box=init_box,
             inference_disp_fn=inference_disp_fn,
             geometry_dtype=geometry_dtype,
+            neighbor_grad=self.config.get("neighbor_grad", "scatter"),
         )
         return model
 
@@ -345,6 +358,7 @@ class GMNNBuilder(ModelBuilder):
     def build_descriptor(
         self,
         apply_mask,
+        fused_nlh=None,
     ):
         radial_fn = self.build_radial_function()
         descriptor = GaussianMomentDescriptor(
@@ -355,6 +369,9 @@ class GMNNBuilder(ModelBuilder):
             drop_contractions=tuple(self.config.get("drop_contractions", ())),
             dtype=self.config["descriptor_dtype"],
             apply_mask=apply_mask,
+            moment_kernel=self.config.get("moment_kernel"),
+            fused_nlh=fused_nlh,
+            contract_kernel=self.config.get("contract_kernel") or "xla",
         )
         return descriptor
 

@@ -1,4 +1,5 @@
 import logging
+import os
 import time
 from functools import partial
 from pathlib import Path
@@ -36,7 +37,7 @@ from apax.train.checkpoints import (
 )
 from apax.train.run import setup_logging
 from apax.utils.convert import str_to_dtype
-from apax.utils.space import perpendicular_widths
+from apax.utils.space import perpendicular_widths, periodic_general_elementwise
 
 log = logging.getLogger(__name__)
 
@@ -317,6 +318,24 @@ def maybe_update_pbar(
         sim_pbar.update(pbar_increment)
 
 
+def _cuda_profiler():
+    """libcudart (the one JAX ships) for cudaProfilerStart/Stop, or None."""
+    import ctypes
+    import glob
+
+    import nvidia
+
+    for path in sorted(
+        glob.glob(os.path.join(os.path.dirname(nvidia.__path__[0] + "/"), "cu*/lib/libcudart.so*"))
+    ):
+        try:
+            return ctypes.CDLL(path)
+        except OSError:
+            continue
+    log.warning("APAX_PROFILE_CHUNKS set but libcudart was not found; not profiling")
+    return None
+
+
 def run_sim(
     system: System,
     sim_fns: SimulationFunctions,
@@ -471,16 +490,42 @@ def run_sim(
         leave=True,
     )
     sim_time_per_step = n_inner * ensemble.dt / 1000
+    # Profiling: APAX_PROFILE_CHUNKS=K brackets chunks 1..K (chunk 0 compiles) with
+    # cudaProfilerStart/Stop, for `nsys profile --capture-range=cudaProfilerApi`.
+    profile_chunks = int(os.environ.get("APAX_PROFILE_CHUNKS", "0"))
+    profiler = _cuda_profiler() if profile_chunks > 0 else None
+    profile_first = step + 1 + int(os.environ.get("APAX_PROFILE_SKIP", "0"))
     with mngr:
         while step < n_outer:
+            if profiler is not None and step == profile_first:
+                profiler.cudaProfilerStart()
+            chunk_start = time.perf_counter()
             new_state, neighbor, current_temperature, all_checks_passed = sim(
                 state, step, neighbor
             )
 
-            if needs_reallocation(neighbor):
+            realloc = needs_reallocation(neighbor)  # device sync: the chunk has finished
+            chunk_time = time.perf_counter() - chunk_start
+            log.info(
+                "chunk %d: %.4f s, %.1f steps/s%s",
+                step,
+                chunk_time,
+                n_inner / chunk_time,
+                " (overflow, redone)" if realloc else "",
+            )
+
+            if realloc:
                 # Size the list for where the chunk ended up (densest
                 # configuration / smallest NPT box), then redo the chunk.
                 # Sizing it from `state` would overflow again on the retry.
+                log.info(
+                    "neighbor list overflow in chunk %d (buffer overflow: %s, cell size"
+                    " too small: %s, capacity %d): reallocating and redoing the chunk",
+                    step,
+                    bool(neighbor.did_buffer_overflow),
+                    bool(neighbor.cell_size_too_small),
+                    neighbor.idx.shape[1],
+                )
                 finite = np.all(np.isfinite(new_state.position))
                 neighbor = handle_overflow(
                     neighbor_fn,
@@ -503,6 +548,9 @@ def run_sim(
 
             state = new_state
             step += 1
+            if profiler is not None and step == profile_first + profile_chunks:
+                profiler.cudaProfilerStop()
+                log.info("profiler capture: chunks %d..%d", profile_first, step - 1)
             if is_npt and sim_fns.r_max is not None:
                 check_minimum_image(simulate.npt_box(state), sim_fns.r_max)
             maybe_save_checkpoint(
@@ -604,22 +652,41 @@ def md_setup(model_config: Config, md_config: MDConfig):
         frac_coords = True
         check_minimum_image(system.box, r_max)
 
-        displacement_fn, shift_fn = space.periodic_general(
-            system.box,
-            fractional_coordinates=frac_coords,
-            wrapped=md_config.wrapped,
+        # same maths as space.periodic_general, elementwise box product (no GEMM fusions)
+        displacement_fn, shift_fn = periodic_general_elementwise(
+            system.box, wrapped=md_config.wrapped
         )
+        if md_config.ensemble.name != "npt":
+            # constant box: jax-md's shift_fn recomputes inverse(box) (a cuSOLVER LU per
+            # step) whenever box= is passed; drop it so the precomputed inverse is used
+            _shift = shift_fn
+
+            def shift_fn(R, dR, **kwargs):
+                kwargs.pop("box", None)
+                return _shift(R, dR, **kwargs)
+
+            # lets the model use the fused pair-vector kernels (no box cotangent needed)
+            displacement_fn.constant_box = True
 
     _, gradient_model_params = restore_parameters(model_config.data.model_version_path)
     params = canonicalize_energy_model_parameters(gradient_model_params)
 
     radial_fn = None
-    if md_config.tabulate_radial:
+    if md_config.tabulate_radial or md_config.moment_kernel is not None:
         radial_fn = tabulated_radial(
             model_config, gradient_model_params, system.atomic_numbers
         )
+    model_dict = model_config.model.model_dump()
+    if md_config.moment_kernel is not None:
+        if "hessian" in md_config.properties:
+            raise ValueError("moment_kernel does not support hessians")
+        model_dict["moment_kernel"] = md_config.moment_kernel
+        model_dict["fuse_nlh"] = md_config.fuse_nlh
+        model_dict["contract_kernel"] = md_config.contract_kernel
+        log.info(f"using {md_config.moment_kernel} moment kernels")
+    model_dict["neighbor_grad"] = md_config.neighbor_grad
     Builder = model_config.model.get_builder()
-    builder = Builder(model_config.model.model_dump(), radial_fn=radial_fn)
+    builder = Builder(model_dict, radial_fn=radial_fn)
     energy_model = builder.build_energy_model(
         apply_mask=True,
         init_box=np.array(system.box),
@@ -627,15 +694,28 @@ def md_setup(model_config: Config, md_config: MDConfig):
         geometry_dtype=jnp.float32,
     )
     disable_cell_list = md_config.disable_cell_list or np.all(system.box < 1e-6)
-    neighbor_fn = partition.neighbor_list(
-        displacement_fn,
-        system.box,
-        r_max,
-        md_config.dr_threshold,
-        fractional_coordinates=frac_coords,
-        format=partition.Sparse,
-        disable_cell_list=disable_cell_list,
-    )
+    if md_config.neighbor_builder == "alchemi":
+        if not frac_coords:
+            raise ValueError("neighbor_builder: alchemi needs a periodic box")
+        if md_config.ensemble.name == "npt":
+            raise ValueError("neighbor_builder: alchemi needs a constant box (not NPT)")
+        from apax.md.alchemi_neighbor_list import alchemi_neighbor_list
+
+        neighbor_fn = alchemi_neighbor_list(
+            system.box, r_max, md_config.dr_threshold, md_config.capacity_multiplier,
+            sort_atoms=md_config.sort_atoms, species=system.atomic_numbers,
+        )
+    else:
+        neighbor_fn = partition.neighbor_list(
+            displacement_fn,
+            system.box,
+            r_max,
+            md_config.dr_threshold,
+            fractional_coordinates=frac_coords,
+            format=partition.Sparse,
+            disable_cell_list=disable_cell_list,
+            capacity_multiplier=md_config.capacity_multiplier,
+        )
 
     n_models = 1
     shallow = False
@@ -648,8 +728,11 @@ def md_setup(model_config: Config, md_config: MDConfig):
         if model_config.model.ensemble.kind == "shallow":
             shallow = True
 
+    # identity unless the neighbour list carries a sorting permutation (alchemi, sort_atoms)
+    from apax.md.alchemi_neighbor_list import sorted_frame
+
     energy_fn = create_energy_fn(
-        energy_model.apply,
+        sorted_frame(energy_model.apply),
         params,
         system.atomic_numbers,
         n_models,
@@ -675,6 +758,7 @@ def md_setup(model_config: Config, md_config: MDConfig):
         calc_hessian="hessian" in md_config.properties,
         force_variance=force_variance,
     ).apply
+    auxiliary_fn = sorted_frame(auxiliary_fn, unpermute_outputs=True)
 
     if n_models > 1 and not shallow:
         auxiliary_fn = maybe_vmap(auxiliary_fn, gradient_model_params)
@@ -708,6 +792,9 @@ def run_md(model_config: Config, md_config: MDConfig, log_level="error"):
 
     model_config = parse_config(model_config)
     md_config = parse_config(md_config, mode="md")
+    if md_config.matmul_precision == "highest":
+        # before anything is traced: fp32 matmuls stay fp32 (no TF32)
+        jax.config.update("jax_default_matmul_precision", "highest")
 
     sim_dir = Path(md_config.sim_dir)
     sim_dir.mkdir(parents=True, exist_ok=True)

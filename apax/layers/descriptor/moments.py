@@ -11,6 +11,16 @@ _G2 = np.array([[_U2.index(tuple(sorted((i, j)))) for j in range(3)] for i in ra
 _G3 = np.array([[[_U3.index(tuple(sorted((i, j, k)))) for k in range(3)] for j in range(3)] for i in range(3)])
 
 
+def unpack_symmetric(p, G):
+    """Full symmetric tensor from its unique components (p[..., G]), built from static
+    slices instead of an index gather: identical values, but the transpose is pads and
+    adds (fused) rather than an XLA scatter-add (a separate, slow kernel on GPUs)."""
+    import jax.numpy as jnp
+
+    flat = [p[..., int(u)] for u in np.asarray(G).reshape(-1)]
+    return jnp.stack(flat, axis=-1).reshape(p.shape[:-1] + G.shape)
+
+
 def geometric_moments_packed(radial_function, dn, idx_i, n_atoms=None):
     """Same moments as `geometric_moments`, but each pair stores only the unique components of the symmetric
     rank-2 / rank-3 products (3 + 6 + 10 instead of 3 + 9 + 27 per channel); full tensors are rebuilt per atom
@@ -24,6 +34,8 @@ def geometric_moments_packed(radial_function, dn, idx_i, n_atoms=None):
     m1 = jax.ops.segment_sum(r * dn[:, None, :], idx_i, n_atoms, indices_are_sorted=True)
     p2 = jax.ops.segment_sum(r * u2[:, None, :], idx_i, n_atoms, indices_are_sorted=True)  # (atoms, channels, 6)
     p3 = jax.ops.segment_sum(r * u3[:, None, :], idx_i, n_atoms, indices_are_sorted=True)  # (atoms, channels, 10)
+    # index gather here, not unpack_symmetric: on this path the slice-based version measured 9 %
+    # slower at 3.9k atoms (L40S; it changes XLA's fusion of the surrounding pair scatters)
     return [m0, m1, p2[..., _G2], p3[..., _G3]]
 
 

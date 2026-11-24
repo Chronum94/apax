@@ -7,7 +7,13 @@ import jax.numpy as jnp
 from jax import vmap
 
 from apax.layers.descriptor.basis_functions import RadialFunction
-from apax.layers.descriptor.moments import geometric_moments, geometric_moments_packed
+from apax.layers.descriptor.moments import (
+    _G2,
+    _G3,
+    geometric_moments,
+    geometric_moments_packed,
+    unpack_symmetric,
+)
 from apax.layers.descriptor.triangular_indices import tril_2d_indices, tril_3d_indices
 from apax.layers.masking import mask_by_neighbor
 from apax.utils.convert import str_to_dtype
@@ -22,6 +28,13 @@ class GaussianMomentDescriptor(nn.Module):
     drop_contractions: tuple = ()  # contraction blocks to leave out (XLA prunes their computation)
     dtype: Any = jnp.float32
     apply_mask: bool = True
+    # "warp": fused NVIDIA Warp moment kernels (inference only; needs a
+    # TabulatedRadialFunction with the Bessel basis and the identity transform)
+    moment_kernel: Optional[str] = None
+    # (a, b, r_max, rep_scale) of an NLHRepulsion fused into the Warp kernels; the descriptor
+    # then returns (features, per-atom NLH energy) and the correction is not run separately
+    fused_nlh: Any = None
+    contract_kernel: str = "xla"  # "warp": fused contraction kernels (warp_contract.py)
 
     def setup(self):
         self.r_max = self.radial_fn.r_max
@@ -45,7 +58,75 @@ class GaussianMomentDescriptor(nn.Module):
         self.triang_idxs_2d = tril_2d_indices(n_tensor)
         self.triang_idxs_3d = tril_3d_indices(n_tensor)
 
+    def _warp_moments(self, dr_vec, Z, neighbor_idxs):
+        from apax.layers.descriptor.basis_functions import (
+            BesselBasis,
+            IdentityRadialTransform,
+        )
+        from apax.layers.descriptor.radial_table import TabulatedRadialFunction
+        from apax.layers.descriptor.warp_moments import (
+            fold_compression,
+            warp_packed_moments,
+        )
+
+        rf = self.radial_fn
+        if not (
+            isinstance(rf, TabulatedRadialFunction)
+            and isinstance(rf.basis_fn, BesselBasis)
+            and isinstance(rf.radial_transform, IdentityRadialTransform)
+        ):
+            raise ValueError(
+                "moment_kernel='warp' needs a tabulated radial function with the Bessel "
+                "basis and the identity radial transform"
+            )
+        if not self.apply_mask:
+            raise ValueError("moment_kernel='warp' always masks padded pairs")
+        T0 = jnp.asarray(rf.table, jnp.float32)
+        K = T0.shape[-1]
+        if self.n_radial_tensor:
+            # the compression is linear without bias: its kernel is compression(I)
+            W = self.radial_compression(jnp.eye(K, dtype=str_to_dtype(self.dtype)))
+            T1 = fold_compression(T0, W.astype(jnp.float32))
+        else:
+            T1 = T0
+        if self.contract_kernel == "warp":
+            from apax.layers.descriptor.warp_contract import warp_contract
+
+            if str_to_dtype(self.dtype) != jnp.float32:
+                raise ValueError("contract_kernel='warp' computes in fp32 (descriptor_dtype fp32)")
+            res = warp_packed_moments(
+                dr_vec, Z, neighbor_idxs, rf.species_map, T0, T1, rf.r_max,
+                nlh=self.fused_nlh, packed=True,
+            )
+            feats = warp_contract(
+                res[0], K, T1.shape[-1], self.n_contr, tuple(self.drop_contractions)
+            )
+            return feats, (res[1] if self.fused_nlh is not None else None)
+        res = warp_packed_moments(
+            dr_vec, Z, neighbor_idxs, rf.species_map, T0, T1, rf.r_max, nlh=self.fused_nlh
+        )
+        m0, m1, p2, p3 = res[:4]
+        e_nlh = res[4] if self.fused_nlh is not None else None
+        dtype = str_to_dtype(self.dtype)
+        return [
+            m0.astype(dtype),
+            m1.astype(dtype),
+            unpack_symmetric(p2, _G2).astype(dtype),
+            unpack_symmetric(p3, _G3).astype(dtype),
+        ], e_nlh
+
     def __call__(self, dr_vec, Z, neighbor_idxs):
+        if self.moment_kernel == "warp":
+            moments, e_nlh = self._warp_moments(dr_vec, Z, neighbor_idxs)
+            if self.contract_kernel == "warp":
+                feats = moments  # already contracted
+            else:
+                feats = self._contract(moments, Z.shape[0], str_to_dtype(self.dtype))
+            if e_nlh is not None:
+                return feats, e_nlh
+            return feats
+        elif self.moment_kernel is not None:
+            raise ValueError(f"unknown moment_kernel {self.moment_kernel!r}")
         dtype = str_to_dtype(self.dtype)
         dr_vec = dr_vec.astype(dtype)
         # Z shape n_atoms
@@ -79,6 +160,9 @@ class GaussianMomentDescriptor(nn.Module):
         else:
             moments = moment_fn(radial_function, dn, idx_j, n_atoms)
 
+        return self._contract(moments, n_atoms, dtype)
+
+    def _contract(self, moments, n_atoms, dtype):
         contr_0 = moments[0]
         contr_1 = jnp.einsum("ari, asi -> ars", moments[1], moments[1])  # noqa: E501
         contr_2 = jnp.einsum("arij, asij -> ars", moments[2], moments[2])  # noqa: E501
