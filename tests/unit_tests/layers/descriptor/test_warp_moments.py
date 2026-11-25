@@ -21,6 +21,7 @@ from apax.layers.descriptor.warp_moments import (  # noqa: E402
     warp_packed_moments,
 )
 from apax.layers.masking import mask_by_neighbor  # noqa: E402
+from apax.utils.space import distance  # noqa: E402
 
 requires_gpu = pytest.mark.skipif(
     not any(d.platform == "gpu" for d in jax.devices()), reason="needs a CUDA GPU"
@@ -30,7 +31,9 @@ R_MAX, NB, K, C = 5.0, 12, 12, 5
 
 
 def _system():
-    atoms = bulk("NaCl", "rocksalt", a=5.64).repeat((4, 4, 4))  # 512 atoms, 22.6 A box
+    atoms = bulk("NaCl", "rocksalt", a=5.64, cubic=True).repeat(
+        (4, 4, 4)
+    )  # 512 atoms, 22.6 A box
     atoms.rattle(0.15, seed=1)
     box = jnp.asarray(atoms.cell.array.T)
     disp, _ = space.periodic_general(box, fractional_coordinates=False)
@@ -50,7 +53,7 @@ def _system():
 
 def _reference(dr, idx, Z, smap, n_el, T0, W, N):
     dr = dr.astype(jnp.float64)
-    r = jnp.linalg.norm(dr, axis=-1)
+    r = distance(dr)  # NaN-safe at the zero vectors of padded pairs, as the model
     dn = dr / (r + 1e-5)[:, None]
     zi = Z[jnp.minimum(idx[0], N - 1)]
     zj = Z[jnp.minimum(idx[1], N - 1)]

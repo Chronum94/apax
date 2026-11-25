@@ -84,7 +84,9 @@ def nose_hoover_chain_fused(
         xi, p_xi, Q, _tau, KE, DOF = dataclasses.astuple(state)
         xi = [xi[m] for m in range(chain_length)]
         p_xi = [p_xi[m] for m in range(chain_length)]
-        inv_Q = [1 / Q[m] for m in range(chain_length)]
+        # in the chain's dtype: jax-md stores Q as fp32, and 1 / Q[m] in fp32 would lose the
+        # exact fp32 -> fp64 promotion of the original p / Q (6e-8 relative, E23 fix)
+        inv_Q = [1 / Q[m].astype(KE.dtype) for m in range(chain_length)]
 
         if chain_steps == 1 and sy_steps == 1:
             deltas = [dt]

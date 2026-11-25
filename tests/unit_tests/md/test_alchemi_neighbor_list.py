@@ -21,7 +21,9 @@ CUTOFF, SKIN, CM, EXTRA = 5.0, 0.5, 1.25, 8
 
 
 def _atoms(sheared):
-    atoms = bulk("NaCl", "rocksalt", a=5.64).repeat((5, 5, 5))  # 1000 atoms, 28.2 A box
+    atoms = bulk("NaCl", "rocksalt", a=5.64, cubic=True).repeat(
+        (5, 5, 5)
+    )  # 1000 atoms, 28.2 A box
     if sheared:
         cell = atoms.cell.array.copy()
         cell[1] += 0.15 * cell[0]
@@ -56,7 +58,8 @@ def test_morton_order_is_species_preserving_permutation():
     # spatial locality improves on a scrambled input: neighbours get closer indices
     d = frac[:, None, :] - frac[None, :, :]
     d = np.asarray(d - jnp.round(d)) @ atoms.cell.array
-    i, j = np.nonzero(np.linalg.norm(d, axis=-1) < 4.0)
+    dist = np.linalg.norm(d, axis=-1)
+    i, j = np.nonzero((dist < 4.0) & (dist > 0.0))  # neighbour pairs, no self pairs
     gap_before = np.abs(i - j).mean()
     gap_after = np.abs(inv[i] - inv[j]).mean()
     assert gap_after < 0.5 * gap_before

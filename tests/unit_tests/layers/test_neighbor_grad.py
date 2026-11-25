@@ -28,7 +28,9 @@ CUTOFF, SKIN = 5.0, 0.5
 
 
 def _system(sheared):
-    atoms = bulk("NaCl", "rocksalt", a=5.64).repeat((5, 5, 5))  # 1000 atoms, 28.2 A box
+    atoms = bulk("NaCl", "rocksalt", a=5.64, cubic=True).repeat(
+        (5, 5, 5)
+    )  # 1000 atoms, 28.2 A box
     if sheared:
         cell = atoms.cell.array.copy()
         cell[1] += 0.15 * cell[0]
