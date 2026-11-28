@@ -35,6 +35,8 @@ class GaussianMomentDescriptor(nn.Module):
     # then returns (features, per-atom NLH energy) and the correction is not run separately
     fused_nlh: Any = None
     contract_kernel: str = "xla"  # "warp": fused contraction kernels (warp_contract.py)
+    # return PackedMoments (with contract_kernel "warp"): the energy model contracts per atom block
+    packed_only: bool = False
 
     def setup(self):
         self.r_max = self.radial_fn.r_max
@@ -93,14 +95,34 @@ class GaussianMomentDescriptor(nn.Module):
             from apax.layers.descriptor.warp_contract import warp_contract
 
             if str_to_dtype(self.dtype) != jnp.float32:
-                raise ValueError("contract_kernel='warp' computes in fp32 (descriptor_dtype fp32)")
+                raise ValueError(
+                    "contract_kernel='warp' computes in fp32 (descriptor_dtype fp32)"
+                )
             res = warp_packed_moments(
-                dr_vec, Z, neighbor_idxs, rf.species_map, T0, T1, rf.r_max,
-                nlh=self.fused_nlh, packed=True,
+                dr_vec,
+                Z,
+                neighbor_idxs,
+                rf.species_map,
+                T0,
+                T1,
+                rf.r_max,
+                nlh=self.fused_nlh,
+                packed=True,
             )
-            feats = warp_contract(
-                res[0], K, T1.shape[-1], self.n_contr, tuple(self.drop_contractions)
-            )
+            if self.packed_only:
+                from apax.layers.descriptor.warp_contract import PackedMoments
+
+                feats = PackedMoments(
+                    res[0],
+                    int(K),
+                    int(T1.shape[-1]),
+                    int(self.n_contr),
+                    tuple(self.drop_contractions),
+                )
+            else:
+                feats = warp_contract(
+                    res[0], K, T1.shape[-1], self.n_contr, tuple(self.drop_contractions)
+                )
             return feats, (res[1] if self.fused_nlh is not None else None)
         res = warp_packed_moments(
             dr_vec, Z, neighbor_idxs, rf.species_map, T0, T1, rf.r_max, nlh=self.fused_nlh
@@ -209,7 +231,12 @@ class GaussianMomentDescriptor(nn.Module):
 
         # gaussian_moments shape: n_atoms x n_features
         gaussian_moments = jnp.concatenate(
-            [g for k, g in enumerate(gaussian_moments[: self.n_contr]) if k not in self.drop_contractions], axis=-1
+            [
+                g
+                for k, g in enumerate(gaussian_moments[: self.n_contr])
+                if k not in self.drop_contractions
+            ],
+            axis=-1,
         )
         assert gaussian_moments.dtype == dtype
         return gaussian_moments

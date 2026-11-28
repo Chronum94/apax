@@ -376,6 +376,17 @@ class MDConfig(BaseModel, frozen=True, extra="forbid"):
         | "alchemi": build the sparse neighbour list with NVIDIA ALCHEMI Toolkit-Ops
         | (`pip install nvalchemi-toolkit-ops`; apax/md/alchemi_neighbor_list.py): no
         | materialised candidate pairs. Periodic constant-box ensembles only.
+    backend_block_atoms : int or "auto", default = "auto"
+        | With moment_kernel and contract_kernel "warp": run contraction + readout over blocks of
+        | this many atoms, rematerialised in the backward pass, so each block's per-atom
+        | intermediates stay in L2 (large systems). 0 = off. "auto": sized from the GPU's L2 and
+        | the model's per-atom backend working set, on only for >= 3 blocks
+        | (`warp_contract.auto_backend_block`; L40S, 128-128 readout: ~16k-atom blocks from ~50k
+        | atoms, +5 % at 69k, +9.5 % at 104k).
+    loop_unroll : int, default = 1
+        | Unroll factor of the jitted MD step loop (`lax.fori_loop(..., unroll=)`). The loop
+        | condition is evaluated on the host once per iteration; unrolling amortises it. Helps
+        | small systems (3.9k atoms: +7 % at 2, see SPEEDUPS.md E31) at the cost of compile time.
     sort_atoms : bool, default = True
         | With neighbor_builder: alchemi, renumber atoms internally in Morton (Z-order) at
         | every neighbour-list rebuild, for cache locality (outputs stay in input order).
@@ -443,6 +454,8 @@ class MDConfig(BaseModel, frozen=True, extra="forbid"):
     fuse_nlh: bool = False
     neighbor_builder: Literal["jax_md", "alchemi"] = "jax_md"
     sort_atoms: bool = True
+    loop_unroll: PositiveInt = 1
+    backend_block_atoms: Union[int, Literal["auto"]] = "auto"
     neighbor_grad: Literal["scatter", "pull"] = "scatter"
 
     def dump_config(self):

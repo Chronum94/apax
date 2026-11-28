@@ -351,6 +351,7 @@ def run_sim(
     rng_key: int,
     traj_handler: TrajHandler,
     sampling_rate: int = 10,
+    loop_unroll: int = 1,
     load_momenta: bool = False,
     restart: bool = True,
     checkpoint_interval: int = 50_000,
@@ -439,9 +440,15 @@ def run_sim(
         dynamics_checks,
     )
 
+    # Sampling can only fall on the first step of a chunk when sampling_rate is a multiple of
+    # n_inner: then that step is peeled off and the other n_inner - 1 steps run without the
+    # sampling cond (whose host-callback branch splits the step's CUDA graph: ~9 % at 3.9k
+    # atoms, E31). Same steps sampled and checked as before.
+    peel_sampling = sampling_rate % n_inner == 0
+
     @jax.jit
     def sim(state, outer_step, neighbor):  # TODO make more modular
-        def body_fn(i, state):
+        def step_fn(i, state, sample):
             state, outer_step, neighbor, all_checks_passed = state
             step = i + outer_step * n_inner
 
@@ -462,18 +469,29 @@ def run_sim(
             nbr_position, nbr_f32_kwargs = nbr_f32(state.position, nbr_kwargs)
             neighbor = neighbor.update(nbr_position, **nbr_f32_kwargs)
 
-            condition = step % sampling_rate == 0
-            checks_passed = jax.lax.cond(
-                condition, on_eval, no_eval, state, neighbor, box, nbr_kwargs
-            )
-
-            all_checks_passed = all_checks_passed & checks_passed
+            if sample:
+                condition = step % sampling_rate == 0
+                checks_passed = jax.lax.cond(
+                    condition, on_eval, no_eval, state, neighbor, box, nbr_kwargs
+                )
+                all_checks_passed = all_checks_passed & checks_passed
             return state, outer_step, neighbor, all_checks_passed
 
-        all_checks_passed = True
-        state, outer_step, neighbor, all_checks_passed = jax.lax.fori_loop(
-            0, n_inner, body_fn, (state, outer_step, neighbor, all_checks_passed)
-        )
+        def body_fn(i, state):
+            return step_fn(i, state, True)
+
+        def body_no_sample(i, state):
+            return step_fn(i, state, False)
+
+        carry = (state, outer_step, neighbor, True)
+        if peel_sampling:
+            carry = body_fn(0, carry)
+            carry = jax.lax.fori_loop(
+                1, n_inner, body_no_sample, carry, unroll=loop_unroll
+            )
+        else:
+            carry = jax.lax.fori_loop(0, n_inner, body_fn, carry, unroll=loop_unroll)
+        state, outer_step, neighbor, all_checks_passed = carry
         kinetic_energy = quantity.kinetic_energy(velocity=state.velocity, mass=state.mass)
         current_temperature = 2 * kinetic_energy / n_dof / units.kB
 
@@ -687,6 +705,28 @@ def md_setup(model_config: Config, md_config: MDConfig):
         model_dict["moment_kernel"] = md_config.moment_kernel
         model_dict["fuse_nlh"] = md_config.fuse_nlh
         model_dict["contract_kernel"] = md_config.contract_kernel
+        block = md_config.backend_block_atoms
+        if block == "auto":
+            block = 0
+            if md_config.moment_kernel == "warp" and md_config.contract_kernel == "warp":
+                from apax.layers.descriptor.warp_contract import (
+                    auto_backend_block,
+                    l2_cache_bytes,
+                )
+
+                m = model_config.model
+                l2 = l2_cache_bytes(jax.devices()[0].id)
+                block = auto_backend_block(
+                    len(system.atomic_numbers),
+                    m.n_radial,
+                    m.n_radial_tensor,
+                    m.n_contr,
+                    tuple(m.drop_contractions),
+                    tuple(m.nn),
+                    l2,
+                )
+                log.info(f"backend_block_atoms auto: {block} (L2 {l2 / 2**20:.0f} MiB)")
+        model_dict["backend_block"] = int(block)
         log.info(f"using {md_config.moment_kernel} moment kernels")
     model_dict["neighbor_grad"] = md_config.neighbor_grad
     Builder = model_config.model.get_builder()
@@ -844,6 +884,7 @@ def run_md(model_config: Config, md_config: MDConfig, log_level="error"):
         n_inner=md_config.n_inner,
         extra_capacity=md_config.extra_capacity,
         sampling_rate=md_config.sampling_rate,
+        loop_unroll=md_config.loop_unroll,
         load_momenta=md_config.load_momenta,
         traj_handler=traj_handler,
         rng_key=jax.random.PRNGKey(md_config.seed),

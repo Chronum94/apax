@@ -84,6 +84,10 @@ class EnergyModel(nn.Module):
     geometry_dtype: Any = jnp.float64
     # "pull": scatter-free neighbour-gather backward for jax-md Sparse lists (MD only)
     neighbor_grad: str = "scatter"
+    # > 0 with a descriptor returning PackedMoments: contraction + readout run over blocks of
+    # this many atoms, each rematerialised in the backward pass, so a block's per-atom
+    # intermediates stay in L2 (large systems; L4 in the lab notebook)
+    backend_block: int = 0
 
     def setup(self):
         self.compute_distances = make_distance_fn(
@@ -110,12 +114,41 @@ class EnergyModel(nn.Module):
         # Model Core
         # shape Natoms
         # shape shallow ens: Natoms x Nensemble
+        from apax.layers.descriptor.warp_contract import PackedMoments
+
         g = self.representation(dr_vec, Z, idx)
         e_fused = None
-        if isinstance(g, tuple):  # descriptor with a fused pair energy (e.g. NLH in Warp)
+        # descriptor with a fused pair energy (e.g. NLH in Warp); PackedMoments is itself a
+        # (named) tuple
+        if isinstance(g, tuple) and not isinstance(g, PackedMoments):
             g, e_fused = g
-        h = jax.vmap(self.readout)(g)
-        E_i = self.scale_shift(h, Z)
+
+        if isinstance(g, PackedMoments):
+            if self.property_heads:
+                raise ValueError("backend_block needs a model without property heads")
+            pk = g
+            n_atoms = Z.shape[0]
+            B = self.backend_block if self.backend_block > 0 else n_atoms
+
+            def backend(mdl, packed_b, Z_b):
+                from apax.layers.descriptor.warp_contract import warp_contract
+
+                feats = warp_contract(
+                    packed_b, pk.K, pk.C, pk.n_contr, pk.drop_contractions
+                )
+                return mdl.scale_shift(jax.vmap(mdl.readout)(feats), Z_b)
+
+            block_fn = nn.checkpoint(backend) if B < n_atoms else backend
+            E_i = jnp.concatenate(
+                [
+                    block_fn(self, pk.packed[s : s + B], Z[s : s + B])
+                    for s in range(0, n_atoms, B)
+                ],
+                axis=0,
+            )
+        else:
+            h = jax.vmap(self.readout)(g)
+            E_i = self.scale_shift(h, Z)
 
         if self.mask_atoms:
             E_i = mask_by_atom(E_i, Z)
@@ -198,6 +231,8 @@ def _member_std(x):
     # safe_sqrt: members that agree exactly (padded atoms, components fixed by
     # symmetry) would otherwise give an infinite derivative and NaN gradients
     return safe_sqrt(fp64_sum((x - mean) ** 2, axis=0) / (n_ens - 1))
+
+
 def _symmetrize(dE_dF):
     return 0.5 * (dE_dF + jnp.swapaxes(dE_dF, -1, -2))
 

@@ -275,6 +275,7 @@ class ModelBuilder:
             inference_disp_fn=inference_disp_fn,
             geometry_dtype=geometry_dtype,
             neighbor_grad=self.config.get("neighbor_grad", "scatter"),
+            backend_block=int(self.config.get("backend_block") or 0),
         )
         return model
 
@@ -372,6 +373,9 @@ class GMNNBuilder(ModelBuilder):
             moment_kernel=self.config.get("moment_kernel"),
             fused_nlh=fused_nlh,
             contract_kernel=self.config.get("contract_kernel") or "xla",
+            packed_only=bool(self.config.get("backend_block"))
+            and self.config.get("moment_kernel") == "warp"
+            and self.config.get("contract_kernel") == "warp",
         )
         return descriptor
 

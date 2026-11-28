@@ -40,6 +40,7 @@ fp32 throughout, as the XLA path; results match it to fp32 round-off (summation 
 
 import functools
 import math
+from typing import Any, NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -468,6 +469,58 @@ def _contract_bwd(cfg, packed, g):
 
 
 _contract.defvjp(_contract_fwd, _contract_bwd)
+
+
+class PackedMoments(NamedTuple):
+    """Packed per-atom moments handed to the energy model instead of features, so that the
+    contraction + readout can run over atom blocks (EnergyModel.backend_block, L2 blocking)."""
+
+    packed: Any  # (n_atoms, K + 19 C)
+    K: int
+    C: int
+    n_contr: int
+    drop_contractions: tuple
+
+
+@functools.lru_cache(maxsize=None)
+def l2_cache_bytes(device_ordinal=0):
+    """L2 size of a visible CUDA device from the driver (CU_DEVICE_ATTRIBUTE_L2_CACHE_SIZE),
+    0 if it cannot be queried."""
+    import ctypes
+
+    try:
+        cu = ctypes.CDLL("libcuda.so.1")
+        dev, val = ctypes.c_int(), ctypes.c_int()
+        if cu.cuInit(0) or cu.cuDeviceGet(ctypes.byref(dev), int(device_ordinal)):
+            return 0
+        if cu.cuDeviceGetAttribute(ctypes.byref(val), 38, dev):
+            return 0
+        return int(val.value)
+    except OSError:
+        return 0
+
+
+# Effective backend working set / the estimate below. Fitted on an L40S (96 MiB L2,
+# 128-128 readout): best block 16k atoms, ~6 KB/atom against the 4.8 KB estimate (L4).
+_BLOCK_WS_FACTOR = 1.25
+
+
+def auto_backend_block(n_atoms, K, C, n_contr, drop_contractions, nn, l2_bytes):
+    """Atom-block size for the L2-blocked backend (EnergyModel.backend_block), 0 = off.
+
+    Per-atom fp32 working set of contraction + readout in the backward pass: packed moments
+    and features plus their cotangents, and the saved readout pre-activations. Target block
+    = L2 / working set; blocking only when there are >= 3 target blocks (L40S: a loss of 2 %
+    at ~2 blocks, gains of 5-10 % at >= 4); blocks are equalised so no small tail block."""
+    if l2_bytes <= 0:
+        return 0
+    n_feat = K + len(feature_table(C, n_contr, drop_contractions))
+    per_atom = 4 * (2 * (K + 19 * C) + 2 * n_feat + sum(nn)) * _BLOCK_WS_FACTOR
+    target = int(l2_bytes // per_atom)
+    if target <= 0 or n_atoms < 3 * target:
+        return 0
+    n_blocks = -(-n_atoms // target)
+    return -(-n_atoms // n_blocks)
 
 
 def warp_contract(packed, K, C, n_contr=8, drop_contractions=()):

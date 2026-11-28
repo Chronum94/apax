@@ -124,6 +124,9 @@ must stay within forces < 1-5 meV/A, energy ~ fp32 round-off. Reduced-precision 
 | E23 | Nose-Hoover chain: 1/Q formed once per half step, substeps multiply instead of divide (`md/nhc_fused.py`) | the fused chain is one serial dependency chain of ~60 fp64 `exp` and ~70 fp64 divisions per step, latency-bound on the 1/64-rate fp64 units: ~38 us/step regardless of N (7.5 % of a 3.9k step) | `check_nhc.py` (L40S): one half step from identical states vs the previous code: scale-factor error 1.2e-8 relative to \|scale - 1\|. That was *not* pure fp64 reassociation: jax-md stores Q as fp32, so the first version formed 1 / Q in fp32; `test_nhc_fused.py` (RTX PRO 6000) flagged it (4e-10 relative vs jax-md's chain) and the inverse is now formed in the chain's fp64 dtype (matches jax-md to rtol 1e-10). Closed-loop 100k half steps diverge by ~2e-4 in p_xi for *any* 1-ulp change (chain sensitivity), KE agrees to 1e-9 | **+3 % / +0.3 %** (1963 -> 2022, 753 -> 755); chain fusions 38 -> 23 us/step. Variant with fp32 `expm1` for the scale factors: +0.7 % more, 10x the (still tiny) per-step error: not kept |
 | E24 | Forward split heuristic `default_split`: S = 2^round(log2 sqrt(3e5 / (N C))) instead of "smallest S with N C S >= 2^17" | after E13-E21 the 3.9k optimum moved: S sweep 2 / 4 / 8 / 16 / 32 -> 2032 / **2085** / 2035 (old default) / 1876 / 1544 steps/s; 17.9k S 1 / 2 / 4 -> 733 / **757** / 744; 104k S 1 / 2 -> 97.8 / 98.3. The optimum thread count grows ~sqrt(N) (77k threads at 3.9k, 179k at 17.9k), no fixed target fits both | exact (launch shape only) | **+3.9 %** at 3.9k (2022 -> 2101), 17.9k / 104k unchanged (same S) |
 | E25 | Contraction backward: families 6 and 7 get one kernel per slot position (`make_bwd(FAM, POS)`, accumulator kind static), and the chunk length scales with N (`chunk_length`: 4 at 3.9k, 16 at 17.9k, 32 from ~64k) | ncu 17.9k: the family-6/7 kernels (95 / 105 us) used 166 / 126 registers (16 / 31 % occupancy): all three position branches' D-tensor temporaries live in one kernel. Splitting alone made 3.9k 7.7 % slower: each (family, position) grid is n_chunks x N threads, ~45 blocks at 3.9k | `check_contract.py` unchanged (fwd 1e-7, VJP 0.8-1.2e-7) | **+2.8 % / +0.6 %** (2101 -> 2160, 759 -> 763), 104k +1.3 %; 17.9k backward 243 -> 233 us. Chunk sweep: 3.9k 2 / 4 / 8 / 16 / 32 -> 2140 / 2154 / 2110 / 2029 / 1940 steps/s; 17.9k 4-64 flat; 104k 32 beats 4 by 1.7 % |
+| E30 | ALCHEMI neighbour query `strategy="pair_centric"` (launch size from the search radius, fixed at allocation) | rebuild ~330 us every ~10 steps is ~10 % of a 3.9k step on the RTX PRO 6000 | identical pair sets (`check_nl.py`, `test_alchemi_neighbor_list.py`) | RTX PRO 6000: +3-4 % at 3.9k, +2.7 % at 7.7k, equal at 17.9k / 104k |
+| E31 | MD loop: when `sampling_rate` is a multiple of `n_inner`, the first step of each chunk (the only one that can sample) is peeled off and the other steps run without the sampling `cond`; new `loop_unroll` option (default 1) for `fori_loop(unroll=)` | nsys: XLA drives the step loop from the host (1 sync + 2 graph launches per step); the sampling `cond` with its host-callback branch splits the step graph. Removing it: +9.4 % at 3.9k. WHILE/CONDITIONAL command buffers do not move the loop to the device | same frames at the same steps, first frame equal to 3e-9 A (later frames diverge chaotically, as any fusion change does); apax MD unit tests pass | RTX PRO 6000: +4.4 % (3.9k), +3.0 % (7.7k), 0 % (17.9k); with `loop_unroll: 2` +9.6 % / +5.1 % / +0.9 % at +2.2 s compile |
+| E32 | L2 atom blocking of the backend: `backend_block_atoms` (default `"auto"`). With both Warp kernels the descriptor returns the packed moments (`PackedMoments`) and `EnergyModel` runs contraction + readout + scale-shift over atom blocks, each under `nn.checkpoint`, so a block's per-atom intermediates (features, pre-activations and their cotangents, ~6 KB/atom for the 128-128 model) are made and consumed in L2. `"auto"`: L2 size from the driver (`cuDeviceGetAttribute`), block = L2 / per-atom working set `4 (2 (K + 19 C) + 2 n_feat + sum(nn)) x 1.25`, on only for >= 3 blocks, blocks equalised; `0` = off, an integer = that size | L40S per-atom cost rises 28 % from 15.4k to 104k atoms; the growth is in memory-bound XLA ops (cotangent transpose f32[355, N] 0.93 -> 5.14 ns/atom, readout SiLU fusions 0.39 -> 2.96), ncu: DRAM bytes/atom ~2x, readout L2 hit rate 50 -> 29 % | blocked vs unblocked (30.9k, 8k blocks): \|dE\| 2.7e-5 eV, max \|dF\| 0.006 meV/A; `test_backend_block.py` | L40S, 6 A 128-128: 16k blocks +4.9 % (69.5k), **+9.5 % (104k)**, 30.9k -2 % (auto: off); auto = best hand-picked (172.0 / 113.2 vs 172.3 / 113.4 steps/s). Block sweep 104k: 4k / 8k / 16k / 24k / 32k -> 0.97 / 1.05 / 1.095 / 1.08 / 1.09x. 5 A 16/8/4 64-64 model: +4.7 % at 104k (auto 26k; best 35k, +6.6 %) |
 | E7 (reverted) | Pass the whole (2, P) pair array to Warp kernels (no row slices) | a row slice as custom-call operand is materialised: 4 x 10.4 MB DtoD copies per step at 17.9k (~55 us) | exact | copies gone, but **-5.6 % at 17.9k** (A/B x2), 0 % at 3.9k: unrelated XLA kernels got slower. Kept slices; see D. |
 
 Note on E14 at 17.9k (and E7): the sorting ops themselves are ~free (identity-permutation control is equally slow),
@@ -159,6 +162,10 @@ E1 is **not** applied to the XLA path: there it measured 9 % slower at 3.9k (fus
 | E7: whole (2, P) pair array to Warp kernels instead of row slices | removes 4 x 10 MB copies/step, yet -5.6 % at 17.9k (reproducible, interleaved A/B); XLA kernels such as the contraction transpose (58 -> 118 us) and readout SiLU fusion (43 -> 88 us) slowed. Hypothesis: the copies act as graph barriers; without them independent graph branches run concurrently and contend with the Warp kernels. |
 | Larger neighbour skin (1.0 / 1.5 A) | flat |
 | E26: vector-packed radial coefficients in `gm_forward` (one length-4 vector load per basis function) | exact, but the kernel went 217 -> 469 us: Warp's generic-length vector accumulate does not compile to vector loads + FMAs |
+| E27: one thread per (atom, split) for all channels in `gm_forward` (basis once per pair, vec4 coefficient loads) | 2.8x fewer instructions but 168 registers, 14 % occupancy: 2x slower. The kernel is latency-bound; thread parallelism beats removing the redundant basis evaluations |
+| E28: 2-4 channel groups per atom in `gm_forward` | monotone: fewer threads per atom is slower (-2 to -9 %) |
+| E29: merge contraction-backward families 1-5 into one kernel | no gain; launches inside XLA's CUDA graph are cheap |
+| WHILE / CONDITIONAL command buffers | loop stays host-driven (2 syncs/step instead of 1); no gain |
 | E17: per-family forward contraction kernels | kernels 105 -> 83 us, but zero-initialising the in/out feature array costs 27 us and 3.9k loses 1.8 % to extra launches |
 
 ## E. Known remaining costs (documented, not changed)
@@ -171,8 +178,12 @@ E1 is **not** applied to the XLA path: there it measured 9 % slower at 3.9k (fus
 * Not performance, found while validating: `H5TrajHandler` (apax/md/io.py) builds `Atoms(numbers, positions,
   momenta=...)` without the simulation masses, so trajectory *velocities* are p / (default element mass); wrong for
   any custom-mass run (e.g. H mass 4). Dynamics are unaffected. One-line fix: pass `masses=`.
-* Also found while validating: a 20k-step NVE run with `sampling_rate: 20` left only 1900 frames at 0.5 fs spacing
-  (the first 0.95 ps) in md.h5; trajectory sampling / buffer flushing should be checked (`../perf_notes.md` V1).
+* Also found while validating: the md.h5 `time` dataset advances by dt per *frame* instead of dt x sampling_rate
+  (frames every 20 steps of 0.5 fs are labelled 0.5 fs apart), and it has fewer entries than the value arrays
+  (1900 vs 2000 for a 40k-step run). Frames are all there; only the time axis is wrong (`../perf_notes.md` RP3).
+* Model, not code: in NVE at ~466 K the benchmark model (g20_r6t5) blows up after ~18.5 ps on the RTX PRO 6000 in
+  *both* the all-JAX and the Warp path, via an intermolecular H-H contact closing below 1 A (missing short-range H-H
+  repulsion). Energy conservation before that is identical for both paths (RP3).
 * NLH repulsion pair loop (~210 us/step at 17.9k) and the pair-cotangent `add_any` it causes; fusing NLH into the Warp
   pair kernels is the lever.
 
@@ -188,6 +199,8 @@ without a CUDA GPU or without `warp-lang` / `nvalchemi-toolkit-ops`.
 | `tests/unit_tests/layers/test_neighbor_grad.py` | CSR starts (incl. padding / empty atoms / jax-md stray slot), reverse pairs (computed and cached row), `gather_pair` VJP, E21 `pair_vectors` (cubic + triclinic) | host brute force / XLA |
 | `tests/unit_tests/md/test_alchemi_neighbor_list.py` | E12/E14/E16 adapter: identical pairs / capacity / layout vs jax-md, reverse row, rebuild criterion, sorted lists; Morton permutation and `sorted_frame` (CPU) | jax-md Sparse list |
 | `tests/unit_tests/md/test_nhc_fused.py` | fused Nose-Hoover chain incl. E23 (CPU) | `jax_md.simulate.nose_hoover_chain` |
+| `tests/unit_tests/md/test_loop_peel_unroll.py` | E31: peeled sampling step and `loop_unroll` 1 / 2 / 3 (incl. remainder) give the same sampled frames at the same steps (CPU) | unpeeled, unrolled-once `run_sim` |
+| `tests/unit_tests/nn/test_backend_block.py` | E32: auto block-size rule (CPU); blocked (uneven last block) and single-block Warp model vs unblocked energy and forces; L2 query | unblocked Warp model |
 
 End-to-end accuracy against a full-fp64 model and NVE conservation need a trained model; they remain scripts
 (`check_fp64.py`, NVE runs) and are summarised at the top of this document.
@@ -196,6 +209,32 @@ End-to-end accuracy against a full-fp64 model and NVE conservation need a traine
 17.9k 1.04 GB, 143k 4.9 GB, 483k 9.3 GB, 858k 18.1 GB, 1.14M 34.7 GB (fits; before E15/E21 the 858k run needed
 34.6 GB). The default jax-md builder needs far more for non-cubic boxes (19 GB at 71.5k, 34.6 GB at 322k): its
 fractional cell list uses the shortest axis' cell count on all axes (`../perf_notes.md` M1).
+
+## G. RTX PRO 6000 Blackwell (sm_120, 96 GB) results, 2026-11-25
+
+Same code and heuristics (fitted on the L40S), scrambled atom order, model g20_r6t5 (r_max 6 A, list 6.5 A, ~103
+neighbours/atom), recommended config incl. ALCHEMI. steps/s (us/atom-step):
+
+| atoms | original apax (TF32) | branch all-JAX (fp32) | Warp, 1 process | Warp, 2 processes via MPS (total) |
+|---|---|---|---|---|
+| 3.9k | 722 (0.359) | 739 (0.350) | 2470 (0.105) | **3609 (0.072)** |
+| 17.9k | 172 (0.326) | 194 (0.288) | 1045 (0.054) | **1244 (0.045)** |
+| 104k | 27.8 (0.345) | 31.2 (0.308) | **185 (0.052)** | 170 (0.057) |
+
+* Update after E30 / E31 (`loop_unroll: 2`), single process: 3.9k 2584 (0.100 us/atom-step), 7.7k 1905 (0.068), 15.4k
+  1222 (0.053), 17.9k 1116 (0.050), 30.9k 617 (0.053), 61.8k 340 (0.048), 104k 191 (0.050) steps/s. MPS: 3.9k
+  3900 / 4431 / 4530 with 2 / 4 / 8 lanes, 17.9k 1257 with 2 lanes.
+* Best Warp vs original: 5.0x / 7.2x / 6.7x (before E30 / E31). Warp single process vs L40S: +14 % / +37 % / +86 %.
+* CUDA MPS (the GPU is in Exclusive_Process mode; MPS is the only way to share it): pays below ~30k atoms per
+  process. Stack scan (total steps/s, 1 / 2 / 3 / 4 / 6 / 8 lanes): 3.9k 2295 / 3537 / 4161 / 4257 / 4548 / 4595;
+  17.9k 1083 / 1231 / 1161 / 1120. Size scan (us/atom-step, 1 process | 2 lanes): 3.9k 0.107 | 0.073, 7.7k 0.074 |
+  0.054, 15.4k 0.058 | 0.046, 17.9k 0.052 | 0.043, 30.9k 0.054 | 0.047, 61.8k 0.049 | 0.053, 104k 0.052 | 0.053:
+  a single process reaches ~0.05 from ~18k atoms; 2 lanes of 15-31k atoms is the most efficient setting measured.
+* Defaults fitted on the L40S (forward split, backward chunk length) re-swept on Blackwell: still the best values.
+* Thermostat cost: the Nose-Hoover chain is ~35 us/step of serial fp64 regardless of size; Langevin is +12 % faster
+  at 3.9k and +5 % at 17.9k, NHC with chain_steps = sy_steps = 1 +11 % at 3.9k (user choices, defaults unchanged). The MPS control socket path must be < 108 characters (Unix socket limit), else the daemon exits silently.
+* Accuracy (check_fp64) and NVE energy conservation identical to the L40S and to the all-JAX path (`../perf_notes.md`
+  RP1-RP3). All 31 fast-path unit tests pass here.
 
 ## F. Portability (what is L40S-specific)
 
